@@ -1,0 +1,653 @@
+# template.py
+
+HTML_TEMPLATE = r"""
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard GNR - Cohen</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+body{background:#f0f2f5;font-size:.875rem; margin:0; padding:0;}
+.navbar{background:linear-gradient(135deg,#1a1a2e,#16213e)}
+.kpi-card{border:none;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.kpi-value{font-size:1.5rem;font-weight:700}
+.kpi-label{font-size:.72rem;color:#6c757d;text-transform:uppercase;letter-spacing:.05em}
+.gain{color:#198754!important}.loss{color:#dc3545!important}
+.badge-gain{background:#d1e7dd;color:#0a3622}.badge-loss{background:#f8d7da;color:#58151c}
+.table-wrapper{max-height:520px;overflow-y:auto}
+table th{position:sticky;top:0;background:#fff;z-index:1;cursor:pointer;user-select:none;white-space:nowrap}
+table th:hover{background:#f0f2f5}
+table th.sort-asc::after{content:" \2191"}
+table th.sort-desc::after{content:" \2193"}
+table th:not(.sort-asc):not(.sort-desc):not(.nosort)::after{content:" \2195";color:#adb5bd;font-size:.7rem}
+.heat-cell{width:80px;min-width:80px;text-align:center;font-size:.7rem;padding:3px 4px!important;border-radius:4px}
+.heat-ticker{font-size:.65rem;font-weight:700;white-space:nowrap;max-width:75px;overflow:hidden;text-overflow:ellipsis}
+.section-title{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#6c757d;margin-bottom:.75rem}
+.autocomplete-wrap{position:relative}
+.autocomplete-list{position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #dee2e6;border-radius:4px;max-height:200px;overflow-y:auto;z-index:100;display:none}
+.autocomplete-item{padding:5px 10px;cursor:pointer;font-size:.82rem}
+.autocomplete-item:hover,.autocomplete-item.active{background:#e9ecef}
+.copy-btn{font-size:.72rem;padding:2px 8px}
+input[type=checkbox]{width:15px;height:15px;cursor:pointer}
+</style>
+</head>
+<body>
+
+<nav class="navbar navbar-dark py-2 mb-4">
+  <div class="container-fluid">
+    <span class="navbar-brand fw-bold fs-6">Dashboard GNR &mdash; Cohen</span>
+    <span class="text-white-50" style="font-size:.72rem">
+      MEP: <strong class="text-warning">$ __MEP_DISPLAY__</strong>
+      &nbsp;|&nbsp; Arancel: 1.1%
+      &nbsp;|&nbsp; Actualizado: __TS__
+      &nbsp;|&nbsp; Prox. Refresco: <span id="countdown"></span>
+    </span>
+  </div>
+</nav>
+
+<div class="container-fluid px-4">
+  <div class="row g-3 mb-4" id="kpis"></div>
+
+  <ul class="nav nav-tabs mb-0" id="mainTabs">
+    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-tabla">Tabla completa</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-cliente">Por cliente</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-ticker">Por ticker</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-charts">Rankers</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-heat">Mapa calor</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-gr">G. Realizada</a></li>
+    <li class="nav-item"><a class="nav-link text-danger" data-bs-toggle="tab" href="#tab-alertas">Alertas</a></li>
+  </ul>
+
+  <div class="tab-content bg-white rounded-bottom rounded-end shadow-sm p-3">
+
+    <div class="tab-pane fade show active" id="tab-tabla">
+      <div class="d-flex gap-2 mb-3 flex-wrap align-items-center">
+        <input id="search-global" class="form-control form-control-sm" style="max-width:200px" placeholder="Cliente o ticker...">
+        <select id="filter-tipo" class="form-select form-select-sm" style="max-width:130px">
+          <option value="">Todos</option><option>Acciones</option><option>Cedear</option>
+        </select>
+        <div class="ms-auto d-flex gap-2">
+          <button class="btn btn-sm btn-outline-success" onclick="filterPnl('gain')">Ganancias</button>
+          <button class="btn btn-sm btn-outline-danger"  onclick="filterPnl('loss')">Perdidas</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="filterPnl('')">Todos</button>
+          <button class="btn btn-sm btn-outline-primary copy-btn" onclick="copyTable('main-table')">Copiar tabla</button>
+          <button class="btn btn-sm btn-warning" data-bs-toggle="modal" data-bs-target="#modalOrden">Generar orden WA</button>
+        </div>
+      </div>
+      <div class="table-wrapper">
+        <table class="table table-sm table-hover mb-0" id="main-table">
+          <thead><tr>
+            <th class="nosort"><input type="checkbox" id="chk-all" onchange="toggleAll(this)"></th>
+            <th onclick="sortTable('main-table',1)">Cliente</th>
+            <th onclick="sortTable('main-table',2)">Ticker</th>
+            <th onclick="sortTable('main-table',3)">Tipo</th>
+            <th onclick="sortTable('main-table',4)" class="text-end">Cant.</th>
+            <th onclick="sortTable('main-table',5)" class="text-end">Precio ARS</th>
+            <th onclick="sortTable('main-table',6)" class="text-end">Valor ARS</th>
+            <th onclick="sortTable('main-table',7)" class="text-end">Valor neto ARS</th>
+            <th onclick="sortTable('main-table',8)" class="text-end">Valor USD (MEP)</th>
+            <th onclick="sortTable('main-table',9)" class="text-end">Costo ARS</th>
+            <th onclick="sortTable('main-table',10)" class="text-end">P&amp;L ARS</th>
+            <th onclick="sortTable('main-table',11)" class="text-end">P&amp;L %</th>
+            <th onclick="sortTable('main-table',12)" class="text-end">P&amp;L USD</th>
+            <th onclick="sortTable('main-table',13)" class="text-end">Var dia %</th>
+          </tr></thead>
+          <tbody id="main-tbody"></tbody>
+        </table>
+      </div>
+      <div class="text-muted mt-2" style="font-size:.72rem" id="count-label"></div>
+    </div>
+
+    <div class="tab-pane fade" id="tab-cliente">
+      <div class="d-flex gap-2 align-items-center mb-3">
+        <label class="fw-bold text-nowrap" style="font-size:.8rem">Cliente:</label>
+        <div class="autocomplete-wrap" style="max-width:380px;width:100%">
+          <input id="search-cliente-input" class="form-control form-control-sm" placeholder="Buscar por nombre o nro cuenta..." autocomplete="off">
+          <div id="search-cliente-list" class="autocomplete-list"></div>
+        </div>
+        <button class="btn btn-sm btn-outline-primary copy-btn ms-auto" onclick="copyTable('table-cliente')">Copiar</button>
+      </div>
+      <div class="row g-3 mb-3" id="kpis-cliente"></div>
+      <div class="table-wrapper">
+        <table class="table table-sm table-hover" id="table-cliente">
+          <thead><tr>
+            <th onclick="sortTable('table-cliente',0)">Ticker</th>
+            <th onclick="sortTable('table-cliente',1)">Descripcion</th>
+            <th onclick="sortTable('table-cliente',2)">Tipo</th>
+            <th onclick="sortTable('table-cliente',3)" class="text-end">Cant.</th>
+            <th onclick="sortTable('table-cliente',4)" class="text-end">Precio ARS</th>
+            <th onclick="sortTable('table-cliente',5)" class="text-end">Valor ARS</th>
+            <th onclick="sortTable('table-cliente',6)" class="text-end">Valor neto</th>
+            <th onclick="sortTable('table-cliente',7)" class="text-end">USD (MEP)</th>
+            <th onclick="sortTable('table-cliente',8)" class="text-end">Costo ARS</th>
+            <th onclick="sortTable('table-cliente',9)" class="text-end">P&amp;L ARS</th>
+            <th onclick="sortTable('table-cliente',10)" class="text-end">P&amp;L %</th>
+            <th onclick="sortTable('table-cliente',11)" class="text-end">Var dia %</th>
+          </tr></thead>
+          <tbody id="tbody-cliente"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="tab-pane fade" id="tab-ticker">
+      <div class="d-flex gap-2 align-items-center mb-3">
+        <label class="fw-bold text-nowrap" style="font-size:.8rem">Ticker:</label>
+        <div class="autocomplete-wrap" style="max-width:220px">
+          <input id="search-ticker-input" class="form-control form-control-sm" placeholder="Buscar ticker..." autocomplete="off">
+          <div id="search-ticker-list" class="autocomplete-list"></div>
+        </div>
+        <button class="btn btn-sm btn-outline-primary copy-btn ms-auto" onclick="copyTable('table-ticker')">Copiar</button>
+      </div>
+      <div class="row g-3 mb-3" id="kpis-ticker"></div>
+      <div class="table-wrapper">
+        <table class="table table-sm table-hover" id="table-ticker">
+          <thead><tr>
+            <th onclick="sortTable('table-ticker',0)">Nro</th>
+            <th onclick="sortTable('table-ticker',1)">Cliente</th>
+            <th onclick="sortTable('table-ticker',2)" class="text-end">Cant.</th>
+            <th onclick="sortTable('table-ticker',3)" class="text-end">Precio ARS</th>
+            <th onclick="sortTable('table-ticker',4)" class="text-end">Valor ARS</th>
+            <th onclick="sortTable('table-ticker',5)" class="text-end">Valor neto</th>
+            <th onclick="sortTable('table-ticker',6)" class="text-end">Costo ARS</th>
+            <th onclick="sortTable('table-ticker',7)" class="text-end">P&amp;L ARS</th>
+            <th onclick="sortTable('table-ticker',8)" class="text-end">P&amp;L %</th>
+            <th onclick="sortTable('table-ticker',9)" class="text-end">P&amp;L USD</th>
+          </tr></thead>
+          <tbody id="tbody-ticker"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="tab-pane fade" id="tab-charts">
+      <div class="row g-3">
+        <div class="col-md-6"><div class="section-title">Top 10 ganancias por posicion (ARS)</div><canvas id="chart-gainers" height="250"></canvas></div>
+        <div class="col-md-6"><div class="section-title">Top 10 perdidas por posicion (ARS)</div><canvas id="chart-losers" height="250"></canvas></div>
+        <div class="col-md-6"><div class="section-title">Mejores tickers (P&amp;L total ARS)</div><canvas id="chart-ticker-gain" height="250"></canvas></div>
+        <div class="col-md-6"><div class="section-title">Peores tickers (P&amp;L total ARS)</div><canvas id="chart-ticker-loss" height="250"></canvas></div>
+      </div>
+    </div>
+
+    <div class="tab-pane fade" id="tab-heat">
+      <p class="text-muted" style="font-size:.72rem">Verde = ganancia, rojo = perdida. Top 40 tickers por exposicion.</p>
+      <div style="overflow:auto;max-height:600px">
+        <table class="table table-bordered table-sm mb-0" id="heat-table">
+          <thead id="heat-head"></thead><tbody id="heat-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="tab-pane fade" id="tab-gr">
+      <div class="d-flex gap-2 mb-3 align-items-center">
+        <input id="search-gr" class="form-control form-control-sm" style="max-width:200px" placeholder="Cliente o ticker..." oninput="filterGR()">
+        <div class="ms-auto d-flex gap-2">
+          <button class="btn btn-sm btn-outline-success" onclick="filterGRPnl('gain')">Ganancias</button>
+          <button class="btn btn-sm btn-outline-danger"  onclick="filterGRPnl('loss')">Perdidas</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="filterGRPnl('')">Todos</button>
+          <button class="btn btn-sm btn-outline-primary copy-btn" onclick="copyTable('gr-table')">Copiar</button>
+        </div>
+      </div>
+      <div id="gr-kpis" class="row g-3 mb-3"></div>
+      <div class="table-wrapper">
+        <table class="table table-sm table-hover" id="gr-table">
+          <thead><tr>
+            <th onclick="sortTable('gr-table',0)">Cliente</th>
+            <th onclick="sortTable('gr-table',1)">Ticker</th>
+            <th onclick="sortTable('gr-table',2)">Tipo</th>
+            <th onclick="sortTable('gr-table',3)">Fecha</th>
+            <th onclick="sortTable('gr-table',4)">Mov.</th>
+            <th onclick="sortTable('gr-table',5)" class="text-end">Cant.</th>
+            <th onclick="sortTable('gr-table',6)" class="text-end">P.Compra ARS</th>
+            <th onclick="sortTable('gr-table',7)" class="text-end">P.Venta ARS</th>
+            <th onclick="sortTable('gr-table',8)" class="text-end">Imp.Compra</th>
+            <th onclick="sortTable('gr-table',9)" class="text-end">Imp.Venta</th>
+            <th onclick="sortTable('gr-table',10)" class="text-end">GR ARS</th>
+            <th onclick="sortTable('gr-table',11)" class="text-end">GR %</th>
+            <th onclick="sortTable('gr-table',12)" class="text-end">GR USD</th>
+          </tr></thead>
+          <tbody id="gr-tbody"></tbody>
+        </table>
+      </div>
+      <div class="text-muted mt-2" style="font-size:.72rem" id="gr-count"></div>
+    </div>
+
+    <div class="tab-pane fade" id="tab-alertas">
+      <div class="row g-3 mb-3">
+        <div class="col-auto">
+          <label class="form-label" style="font-size:.72rem">Umbral perdida (%)</label>
+          <input type="number" id="umbral-loss" class="form-control form-control-sm" value="10" style="width:90px" oninput="renderAlertas()">
+        </div>
+        <div class="col-auto">
+          <label class="form-label" style="font-size:.72rem">Umbral ganancia (%)</label>
+          <input type="number" id="umbral-gain" class="form-control form-control-sm" value="20" style="width:90px" oninput="renderAlertas()">
+        </div>
+      </div>
+      <div id="alertas-content"></div>
+    </div>
+
+  </div>
+</div>
+
+<div class="modal fade" id="modalOrden" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Generar orden para Mesa de Operaciones</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3 mb-3">
+          <div class="col-auto">
+            <label class="form-label fw-bold">Operacion</label>
+            <select id="orden-tipo" class="form-select form-select-sm">
+              <option value="VENTA">VENTA</option>
+              <option value="COMPRA">COMPRA</option>
+            </select>
+          </div>
+          <div class="col-auto">
+            <label class="form-label fw-bold">Precio</label>
+            <select id="orden-precio-tipo" class="form-select form-select-sm" onchange="togglePrecioInput()">
+              <option value="MKT">Precio MKT</option>
+              <option value="LIMITE">Precio Limite</option>
+            </select>
+          </div>
+          <div class="col-auto" id="wrap-precio-limite" style="display:none">
+            <label class="form-label fw-bold">Precio limite</label>
+            <input type="text" id="orden-precio-valor" class="form-control form-control-sm" placeholder="ej: 4800">
+          </div>
+        </div>
+        <div id="orden-preview" class="mb-3">
+          <p class="text-muted" style="font-size:.8rem">Selecciona posiciones con el checkbox en la tabla principal.</p>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-bold">Mensaje generado</label>
+          <textarea id="orden-texto" class="form-control" rows="10" style="font-size:.8rem;font-family:monospace"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" onclick="generarOrden()">Actualizar mensaje</button>
+        <button class="btn btn-success btn-sm" onclick="copiarOrden()">Copiar para WA</button>
+        <button class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// INYECCIÓN DE DATOS DESDE PYTHON
+const DATA    = __DATA_JSON__;
+const DATA_GR = __DATA_GR_JSON__;
+const MEP     = __MEP__;
+
+// --- UTILS ---
+const fmt    = (v,d=0) => v==null?'':Number(v).toLocaleString('es-AR',{minimumFractionDigits:d,maximumFractionDigits:d});
+const fmtPct = v => v==null?'':(v>=0?'+':'')+Number(v).toFixed(2)+'%';
+const cls    = v => v>=0?'gain':'loss';
+function pnlBadge(v){const c=v>=0?'badge-gain':'badge-loss';return `<span class="badge ${c}">${fmtPct(v)}</span>`;}
+
+// --- KPIs ---
+function renderKPIs(){
+  const totalValor  = DATA.reduce((s,d)=>s+(d.valor_ars||0),0);
+  const totalNeto   = DATA.reduce((s,d)=>s+(d.valor_neto||0),0);
+  const totalPnlARS = DATA.reduce((s,d)=>s+(d.pnl_ars||0),0);
+  const totalPnlUSD = DATA.reduce((s,d)=>s+(d.pnl_usd||0),0);
+  const totalCosto  = DATA.reduce((s,d)=>s+(d.costo_ars||0),0);
+  const pct = totalCosto ? totalPnlARS/totalCosto*100 : 0;
+  const gan = DATA.filter(d=>d.pnl_ars>0).length;
+  const per = DATA.filter(d=>d.pnl_ars<0).length;
+  document.getElementById('kpis').innerHTML=[
+    {l:'Posiciones',     v:fmt(DATA.length),   s:`${gan} ganadoras / ${per} perdedoras`, color:'#0d6efd'},
+    {l:'Valor ARS',      v:'$ '+fmt(totalValor), s:'Precio mercado',                     color:'#0d6efd'},
+    {l:'Valor neto ARS',v:'$ '+fmt(totalNeto),  s:'Descontando 1.1% arancel',           color:'#0d6efd'},
+    {l:'P&L ARS',       v:'$ '+fmt(totalPnlARS),s:fmtPct(pct)+' sobre costo',          color:totalPnlARS>=0?'#198754':'#dc3545'},
+    {l:'P&L USD',       v:'U$S '+fmt(totalPnlUSD,2),s:'Al tipo MEP',                   color:totalPnlUSD>=0?'#198754':'#dc3545'},
+  ].map(c=>`<div class="col-sm-6 col-xl"><div class="card kpi-card p-3">
+    <div class="kpi-label">${c.l}</div>
+    <div class="kpi-value mt-1" style="color:${c.color}">${c.v}</div>
+    <div style="font-size:.68rem;color:#6c757d">${c.s}</div></div></div>`).join('');
+}
+
+// --- TABLA COMPLETA ---
+let cf={text:'',tipo:'',pnl:''};
+function buildMainTable(){
+  document.getElementById('search-global').addEventListener('input',e=>{cf.text=e.target.value.toLowerCase();applyFilters();});
+  document.getElementById('filter-tipo').addEventListener('change',e=>{cf.tipo=e.target.value;applyFilters();});
+  applyFilters();
+}
+function filterPnl(m){cf.pnl=m;applyFilters();}
+function applyFilters(){
+  let rows=DATA;
+  if(cf.text) rows=rows.filter(d=>(d.cliente+d.ticker+d.nro_cuenta).toLowerCase().includes(cf.text));
+  if(cf.tipo) rows=rows.filter(d=>d.tipo===cf.tipo);
+  if(cf.pnl==='gain') rows=rows.filter(d=>d.pnl_ars>0);
+  if(cf.pnl==='loss') rows=rows.filter(d=>d.pnl_ars<0);
+  renderMainRows(rows);
+}
+function renderMainRows(rows){
+  document.getElementById('main-tbody').innerHTML=rows.map(d=>`
+    <tr>
+      <td><input type="checkbox" class="row-chk" data-nro="${d.nro_cuenta}" data-cliente="${d.cliente}" data-ticker="${d.ticker}" data-cant="${d.cantidad}"></td>
+      <td><span class="fw-semibold">${d.nro_cuenta}</span> <span class="text-muted" style="font-size:.78rem">${d.cliente.substring(0,20)}</span></td>
+      <td><strong>${d.ticker}</strong></td>
+      <td><span class="badge bg-secondary">${d.tipo}</span></td>
+      <td class="text-end">${fmt(d.cantidad,2)}</td>
+      <td class="text-end">${fmt(d.precio_ars,2)}</td>
+      <td class="text-end">${fmt(d.valor_ars,0)}</td>
+      <td class="text-end text-primary">${fmt(d.valor_neto,0)}</td>
+      <td class="text-end">${d.valor_usd!=null?fmt(d.valor_usd,0):'-'}</td>
+      <td class="text-end">${fmt(d.costo_ars,0)}</td>
+      <td class="text-end ${cls(d.pnl_ars)}">${fmt(d.pnl_ars,0)}</td>
+      <td class="text-end">${pnlBadge(d.pnl_pct_ars)}</td>
+      <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
+      <td class="text-end ${cls(d.var_dia_pct)}">${fmtPct(d.var_dia_pct)}</td>
+    </tr>`).join('');
+  document.getElementById('count-label').textContent=`Mostrando ${rows.length} de ${DATA.length} posiciones`;
+}
+function toggleAll(chk){document.querySelectorAll('.row-chk').forEach(c=>c.checked=chk.checked);}
+
+// --- AUTOCOMPLETE ---
+function makeAutocomplete(inputId, listId, items, onSelect){
+  const inp=document.getElementById(inputId);
+  const lst=document.getElementById(listId);
+  let idx=-1;
+  inp.addEventListener('input',()=>{
+    const q=inp.value.toLowerCase();
+    const matches=q?items.filter(i=>i.label.toLowerCase().includes(q)).slice(0,15):items.slice(0,15);
+    lst.innerHTML=matches.map((m,i)=>`<div class="autocomplete-item" data-val="${m.value}">${m.label}</div>`).join('');
+    lst.style.display=matches.length?'block':'none';
+    idx=-1;
+  });
+  inp.addEventListener('keydown',e=>{
+    const items2=[...lst.querySelectorAll('.autocomplete-item')];
+    if(e.key==='ArrowDown'){idx=Math.min(idx+1,items2.length-1);}
+    else if(e.key==='ArrowUp'){idx=Math.max(idx-1,0);}
+    else if(e.key==='Enter'&&idx>=0){items2[idx].click();return;}
+    else if(e.key==='Escape'){lst.style.display='none';}
+    items2.forEach((el,i)=>el.classList.toggle('active',i===idx));
+  });
+  lst.addEventListener('click',e=>{
+    const el=e.target.closest('.autocomplete-item');
+    if(!el)return;
+    inp.value=el.textContent;
+    lst.style.display='none';
+    onSelect(el.dataset.val);
+  });
+  document.addEventListener('click',e=>{if(!inp.contains(e.target)&&!lst.contains(e.target))lst.style.display='none';});
+}
+
+// --- POR CLIENTE ---
+function buildClienteTab(){
+  const clientes=[...new Map(DATA.map(d=>[d.nro_cuenta,d])).values()]
+    .sort((a,b)=>a.nro_cuenta.localeCompare(b.nro_cuenta))
+    .map(d=>({value:d.nro_cuenta,label:`${d.nro_cuenta} - ${d.cliente}`}));
+  makeAutocomplete('search-cliente-input','search-cliente-list',clientes,nro=>renderCliente(nro));
+  if(clientes.length){document.getElementById('search-cliente-input').value=clientes[0].label;renderCliente(clientes[0].value);}
+}
+function renderCliente(nro){
+  const rows=DATA.filter(d=>d.nro_cuenta===nro);
+  const tv=rows.reduce((s,d)=>s+(d.valor_ars||0),0);
+  const tn=rows.reduce((s,d)=>s+(d.valor_neto||0),0);
+  const tp=rows.reduce((s,d)=>s+(d.pnl_ars||0),0);
+  const tu=rows.reduce((s,d)=>s+(d.pnl_usd||0),0);
+  const tc=rows.reduce((s,d)=>s+(d.costo_ars||0),0);
+  const pct=tc?tp/tc*100:0;
+  document.getElementById('kpis-cliente').innerHTML=`
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Posiciones</div><div class="kpi-value">${rows.length}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor ARS</div><div class="kpi-value text-primary">$ ${fmt(tv)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor neto ARS</div><div class="kpi-value text-info">$ ${fmt(tn)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div><div style="font-size:.68rem;color:#6c757d">${fmtPct(pct)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L USD</div><div class="kpi-value ${cls(tu)}">U$S ${fmt(tu,2)}</div></div></div>`;
+  document.getElementById('tbody-cliente').innerHTML=
+    [...rows].sort((a,b)=>(b.valor_ars||0)-(a.valor_ars||0)).map(d=>`
+    <tr>
+      <td><strong>${d.ticker}</strong></td>
+      <td class="text-muted">${(d.descripcion||"").substring(0,32)}</td>
+      <td><span class="badge bg-secondary">${d.tipo}</span></td>
+      <td class="text-end">${fmt(d.cantidad,2)}</td>
+      <td class="text-end">${fmt(d.precio_ars,2)}</td>
+      <td class="text-end">${fmt(d.valor_ars,0)}</td>
+      <td class="text-end text-primary">${fmt(d.valor_neto,0)}</td>
+      <td class="text-end">${d.valor_usd!=null?fmt(d.valor_usd,0):'-'}</td>
+      <td class="text-end">${fmt(d.costo_ars,0)}</td>
+      <td class="text-end ${cls(d.pnl_ars)}">${fmt(d.pnl_ars,0)}</td>
+      <td class="text-end">${pnlBadge(d.pnl_pct_ars)}</td>
+      <td class="text-end ${cls(d.var_dia_pct)}">${fmtPct(d.var_dia_pct)}</td>
+    </tr>`).join('');
+}
+
+// --- POR TICKER ---
+function buildTickerTab(){
+  const tickers=[...new Set(DATA.map(d=>d.ticker).filter(Boolean))].sort()
+    .map(t=>({value:t,label:t}));
+  makeAutocomplete('search-ticker-input','search-ticker-list',tickers,t=>renderTicker(t));
+  if(tickers.length){document.getElementById('search-ticker-input').value=tickers[0].label;renderTicker(tickers[0].value);}
+}
+function renderTicker(ticker){
+  const rows=DATA.filter(d=>d.ticker===ticker);
+  const tv  =rows.reduce((s,d)=>s+(d.valor_ars||0),0);
+  const tn  =rows.reduce((s,d)=>s+(d.valor_neto||0),0);
+  const tp  =rows.reduce((s,d)=>s+(d.pnl_ars||0),0);
+  const tu  =rows.reduce((s,d)=>s+(d.pnl_usd||0),0);
+  const tc  =rows.reduce((s,d)=>s+(d.costo_ars||0),0);
+  const cant=rows.reduce((s,d)=>s+(d.cantidad||0),0);
+  const pct =tc?tp/tc*100:0;
+  const precio=rows[0]?.precio_ars||0;
+  document.getElementById('kpis-ticker').innerHTML=`
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Clientes</div><div class="kpi-value">${rows.length}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Cantidad total</div><div class="kpi-value">${fmt(cant,2)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Precio ARS</div><div class="kpi-value text-primary">$ ${fmt(precio,2)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor total</div><div class="kpi-value">$ ${fmt(tv)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor neto</div><div class="kpi-value text-info">$ ${fmt(tn)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div><div style="font-size:.68rem;color:#6c757d">${fmtPct(pct)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L USD</div><div class="kpi-value ${cls(tu)}">U$S ${fmt(tu,2)}</div></div></div>`;
+  document.getElementById('tbody-ticker').innerHTML=
+    [...rows].sort((a,b)=>(b.pnl_ars||0)-(a.pnl_ars||0)).map(d=>`
+    <tr>
+      <td>${d.nro_cuenta}</td><td>${d.cliente.substring(0,28)}</td>
+      <td class="text-end">${fmt(d.cantidad,2)}</td>
+      <td class="text-end">${fmt(d.precio_ars,2)}</td>
+      <td class="text-end">${fmt(d.valor_ars,0)}</td>
+      <td class="text-end text-primary">${fmt(d.valor_neto,0)}</td>
+      <td class="text-end">${fmt(d.costo_ars,0)}</td>
+      <td class="text-end ${cls(d.pnl_ars)}">${fmt(d.pnl_ars,0)}</td>
+      <td class="text-end">${pnlBadge(d.pnl_pct_ars)}</td>
+      <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
+    </tr>`).join('');
+}
+
+// --- CHARTS ---
+function buildCharts(){
+  const sorted=[...DATA].sort((a,b)=>b.pnl_ars-a.pnl_ars);
+  const makeBar=(id,rows,color)=>new Chart(document.getElementById(id),{type:'bar',
+    data:{labels:rows.map(d=>`${d.ticker}(${d.nro_cuenta})`),datasets:[{data:rows.map(d=>Math.abs(d.pnl_ars)),backgroundColor:color,borderRadius:4}]},
+    options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{ticks:{callback:v=>'$'+fmt(v)}}}}});
+  makeBar('chart-gainers',sorted.slice(0,10).filter(d=>d.pnl_ars>0),'#198754');
+  makeBar('chart-losers',sorted.slice(-10).reverse().filter(d=>d.pnl_ars<0),'#dc3545');
+  
+  const tkMap={};
+  DATA.forEach(d=>{if(!tkMap[d.ticker])tkMap[d.ticker]={pnl:0,n:0};tkMap[d.ticker].pnl+=d.pnl_ars||0;tkMap[d.ticker].n++;});
+  const tkArr=Object.entries(tkMap).sort((a,b)=>b[1].pnl-a[1].pnl);
+  const makeBar2=(id,rows,color)=>new Chart(document.getElementById(id),{type:'bar',
+    data:{labels:rows.map(([t,v])=>`${t}(${v.n}cl)`),datasets:[{data:rows.map(([,v])=>Math.abs(v.pnl)),backgroundColor:color,borderRadius:4}]},
+    options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{ticks:{callback:v=>'$'+fmt(v)}}}}});
+  makeBar2('chart-ticker-gain',tkArr.slice(0,10).filter(r=>r[1].pnl>0),'#0d6efd');
+  makeBar2('chart-ticker-loss',tkArr.slice(-10).reverse().filter(r=>r[1].pnl<0),'#fd7e14');
+}
+
+// --- MAPA CALOR ---
+function buildHeatmap(){
+  const cm={},tm={};
+  DATA.forEach(d=>{
+    if(!cm[d.nro_cuenta])cm[d.nro_cuenta]={n:d.cliente,v:0};cm[d.nro_cuenta].v+=d.valor_ars||0;
+    if(!tm[d.ticker])tm[d.ticker]={v:0};tm[d.ticker].v+=d.valor_ars||0;
+  });
+  const clientes=Object.keys(cm).sort((a,b)=>cm[b].v-cm[a].v);
+  const tickers=Object.keys(tm).sort((a,b)=>tm[b].v-tm[a].v).slice(0,40);
+  const lkp={};DATA.forEach(d=>{lkp[`${d.nro_cuenta}|${d.ticker}`]=d.pnl_pct_ars;});
+  const hc=p=>{if(p==null)return'#f0f2f5';if(p>=20)return'#0a3622';if(p>=10)return'#198754';if(p>0)return'#d1e7dd';if(p==0)return'#f8f9fa';if(p>-10)return'#f8d7da';if(p>-20)return'#dc3545';return'#58151c';};
+  const htc=p=>{if(p==null)return'#6c757d';if(p>=10||p<=-20)return'#fff';return'#212529';};
+  document.getElementById('heat-head').innerHTML='<tr><th style="min-width:120px">Cliente</th>'+tickers.map(t=>`<th style="font-size:.62rem;font-weight:700;white-space:nowrap;max-width:70px;overflow:hidden;text-overflow:ellipsis" title="${t}">${t}</th>`).join('')+'</tr>';
+  document.getElementById('heat-body').innerHTML=clientes.map(nro=>{
+    const nombre=cm[nro].n.substring(0,16);
+    return`<tr><td style="white-space:nowrap;font-size:.7rem"><strong>${nro}</strong> ${nombre}</td>${tickers.map(t=>{const p=lkp[`${nro}|${t}`];if(p==null)return`<td style="background:#f0f2f5"></td>`;return`<td class="heat-cell" style="background:${hc(p)};color:${htc(p)}" title="${t}: ${fmtPct(p)}">${fmtPct(p)}</td>`;}).join('')}</tr>`;
+  }).join('');
+}
+
+// --- GANANCIA REALIZADA ---
+let grFilter={text:'',pnl:''};
+function buildGR(){
+  if(!DATA_GR.length){
+    document.getElementById('gr-tbody').innerHTML='<tr><td colspan="13" class="text-center text-muted py-4">Sin datos de ganancia realizada.</td></tr>';
+    return;
+  }
+  const tp=DATA_GR.reduce((s,d)=>s+(d.gr_ars||0),0);
+  const tu=DATA_GR.reduce((s,d)=>s+(d.gr_usd||0),0);
+  document.getElementById('gr-kpis').innerHTML=`
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Operaciones</div><div class="kpi-value">${DATA_GR.length}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">GR Total ARS</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">GR Total USD</div><div class="kpi-value ${cls(tu)}">U$S ${fmt(tu,2)}</div></div></div>`;
+  renderGR();
+}
+function filterGR(){grFilter.text=document.getElementById('search-gr').value.toLowerCase();renderGR();}
+function filterGRPnl(m){grFilter.pnl=m;renderGR();}
+function renderGR(){
+  let rows=DATA_GR;
+  if(grFilter.text)rows=rows.filter(d=>(d.cliente+d.ticker+d.nro_cuenta).toLowerCase().includes(grFilter.text));
+  if(grFilter.pnl==='gain')rows=rows.filter(d=>d.gr_ars>0);
+  if(grFilter.pnl==='loss')rows=rows.filter(d=>d.gr_ars<0);
+  document.getElementById('gr-tbody').innerHTML=rows.map(d=>`
+    <tr>
+      <td><span class="fw-semibold">${d.nro_cuenta}</span> <span class="text-muted" style="font-size:.75rem">${d.cliente.substring(0,18)}</span></td>
+      <td><strong>${d.ticker}</strong></td>
+      <td><span class="badge bg-secondary">${d.tipo}</span></td>
+      <td>${d.fecha}</td><td>${d.mov_tipo}</td>
+      <td class="text-end">${fmt(d.cantidad,2)}</td>
+      <td class="text-end">${fmt(d.precio_compra_ars,2)}</td>
+      <td class="text-end">${fmt(d.precio_venta_ars,2)}</td>
+      <td class="text-end">${fmt(d.importe_compra_ars,0)}</td>
+      <td class="text-end">${fmt(d.importe_venta_ars,0)}</td>
+      <td class="text-end ${cls(d.gr_ars)}">${fmt(d.gr_ars,0)}</td>
+      <td class="text-end">${pnlBadge(d.gr_pct_ars)}</td>
+      <td class="text-end ${cls(d.gr_usd)}">${fmt(d.gr_usd,2)}</td>
+    </tr>`).join('');
+  document.getElementById('gr-count').textContent=`Mostrando ${rows.length} de ${DATA_GR.length} operaciones`;
+}
+
+// --- ALERTAS ---
+function renderAlertas(){
+  const ul=-Math.abs(Number(document.getElementById('umbral-loss').value)||10);
+  const ug= Math.abs(Number(document.getElementById('umbral-gain').value)||20);
+  const losses=DATA.filter(d=>d.pnl_pct_ars<=ul).sort((a,b)=>a.pnl_pct_ars-b.pnl_pct_ars);
+  const gains =DATA.filter(d=>d.pnl_pct_ars>=ug).sort((a,b)=>b.pnl_pct_ars-a.pnl_pct_ars);
+  const tbl=rows=>`<div class="table-wrapper"><table class="table table-sm table-hover"><thead><tr>
+    <th>Cliente</th><th>Ticker</th><th>Tipo</th><th class="text-end">Cant.</th>
+    <th class="text-end">Valor</th><th class="text-end">P&L ARS</th><th class="text-end">P&L %</th><th class="text-end">P&L USD</th></tr></thead>
+    <tbody>${rows.map(d=>`<tr>
+      <td><strong>${d.nro_cuenta}</strong> ${d.cliente.substring(0,22)}</td>
+      <td><strong>${d.ticker}</strong></td><td>${d.tipo}</td>
+      <td class="text-end">${fmt(d.cantidad,2)}</td>
+      <td class="text-end">${fmt(d.valor_ars,0)}</td>
+      <td class="text-end ${cls(d.pnl_ars)}">${fmt(d.pnl_ars,0)}</td>
+      <td class="text-end">${pnlBadge(d.pnl_pct_ars)}</td>
+      <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+  document.getElementById('alertas-content').innerHTML=`
+    <div class="row g-3">
+      <div class="col-lg-6">
+        <div class="d-flex align-items-center mb-2"><span class="badge bg-danger me-2">${losses.length}</span><span class="section-title mb-0">Perdidas > ${Math.abs(ul)}%</span></div>
+        ${tbl(losses)}
+      </div>
+      <div class="col-lg-6">
+        <div class="d-flex align-items-center mb-2"><span class="badge bg-success me-2">${gains.length}</span><span class="section-title mb-0">Ganancias > ${ug}%</span></div>
+        ${tbl(gains)}
+      </div>
+    </div>`;
+}
+
+// --- SORT TABLE ---
+const sortSt={};
+function sortTable(tableId,col){
+  const tbl=document.getElementById(tableId);
+  const key=tableId+'_'+col;
+  const asc=sortSt[key]!==true;
+  sortSt[key]=asc;
+  tbl.querySelectorAll('th').forEach((th,i)=>{
+    th.classList.remove('sort-asc','sort-desc');
+    if(i===col)th.classList.add(asc?'sort-asc':'sort-desc');
+  });
+  const tbody=tbl.querySelector('tbody');
+  [...tbody.querySelectorAll('tr')].sort((a,b)=>{
+    const av=cellNum(a.cells[col]),bv=cellNum(b.cells[col]);
+    if(typeof av==='number'&&typeof bv==='number')return asc?av-bv:bv-av;
+    return asc?String(av).localeCompare(String(bv)):String(bv).localeCompare(String(av));
+  }).forEach(r=>tbody.appendChild(r));
+}
+function cellNum(cell){
+  if(!cell)return'';
+  const txt=cell.textContent.trim().replace(/[.$\s%]/g,'').replace(/,/g,'.');
+  const n=parseFloat(txt.replace(/[^\d.\-]/g,''));
+  return isNaN(n)?cell.textContent.trim():n;
+}
+
+// --- COPIAR TABLA ---
+function copyTable(tableId){
+  const tbl=document.getElementById(tableId);
+  const rows=[...tbl.querySelectorAll('tr')];
+  const tsv=rows.map(r=>[...r.cells].map(c=>c.textContent.trim()).join('\t')).join('\n');
+  navigator.clipboard.writeText(tsv).then(()=>{
+    const btn=event.target;const orig=btn.textContent;
+    btn.textContent='Copiado!';btn.classList.add('btn-success');
+    setTimeout(()=>{btn.textContent=orig;btn.classList.remove('btn-success');},1500);
+  });
+}
+
+// --- ORDEN WA ---
+function togglePrecioInput(){
+  document.getElementById('wrap-precio-limite').style.display=document.getElementById('orden-precio-tipo').value==='LIMITE'?'':'none';
+}
+function generarOrden(){
+  const tipo=document.getElementById('orden-tipo').value;
+  const precioTipo=document.getElementById('orden-precio-tipo').value;
+  const precioVal=document.getElementById('orden-precio-valor').value;
+  const seleccionados=[...document.querySelectorAll('.row-chk:checked')];
+  if(!seleccionados.length){ document.getElementById('orden-texto').value='Sin selecciones.'; return; }
+  const precioStr=precioTipo==='MKT'?'a precio MKT':`a precio limite $ ${precioVal}`;
+  let lineas=seleccionados.map(chk=>`• ${chk.dataset.cliente} (${chk.dataset.nro}) — ${fmt(chk.dataset.cant,0)} nominales ${chk.dataset.ticker}`);
+  const txt=`*ORDENES — ${new Date().toLocaleDateString('es-AR')}*\n\n*${tipo}* ${precioStr}:\n\n${lineas.join('\n')}\n\nQTM Capital`;
+  document.getElementById('orden-texto').value=txt;
+}
+function copiarOrden(){
+  navigator.clipboard.writeText(document.getElementById('orden-texto').value).then(()=>{
+    const btn=event.target; btn.textContent='Copiado!';
+    setTimeout(()=>btn.textContent='Copiar para WA',1500);
+  });
+}
+document.getElementById('modalOrden').addEventListener('show.bs.modal',()=>generarOrden());
+
+// --- COUNTDOWN ---
+const REFRESH_S = __INTERVAL_S__;
+let rem = REFRESH_S;
+const cdEl = document.getElementById('countdown');
+setInterval(()=>{
+  rem--;
+  if(rem<=0){ rem = REFRESH_S; /* Streamlit maneja el refresco externo */ }
+  const m=Math.floor(rem/60), s=rem%60;
+  if(cdEl) cdEl.textContent=m+':'+String(s).padStart(2,'0');
+},1000);
+
+// --- INIT ---
+renderKPIs();
+buildMainTable();
+buildClienteTab();
+buildTickerTab();
+buildCharts();
+buildHeatmap();
+buildGR();
+renderAlertas();
+</script>
+</body>
+</html>
+"""
