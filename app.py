@@ -28,9 +28,9 @@ if st.button("Ingresar"):
             st.session_state.authenticated = True
             st.rerun()
         else:
-            st.error("Contraseña incorrecta")
-    
-    return False
+            st.error("Contraseña incorrecta")    
+return False
+
 # --- CONSTANTES ---
 COHEN_BASE = "https://connect.cohen.com.ar"
 TIPOS_GNR = {"Acciones", "Cedear"}
