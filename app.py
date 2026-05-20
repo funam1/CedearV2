@@ -31,8 +31,8 @@ INTERVALO_REFRESCO_S = 30 * 60
 
 def obtener_token() -> str:
     # Nota: En producción, usa st.secrets para no exponer la clave
-    user = st.secrets.get("X_USER", "quantum")
-    pw = st.secrets.get("X_PASS", "QuantumCapital!+-")
+    user = st.secrets["X_USER"]
+    pw = st.secrets["X_PASS"]
     
     resp = requests.get(
         "http://72.60.155.149:8000/api/cohen/login-token",
