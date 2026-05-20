@@ -23,19 +23,29 @@ st.set_page_config(
 
 password = st.text_input("Contraseña de acceso:", type="password")
 
-if st.button("Ingresar"):
-        if password == st.secrets["Access_pass"]:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("Contraseña incorrecta")    
-return False
-
 # --- CONSTANTES ---
 COHEN_BASE = "https://connect.cohen.com.ar"
 TIPOS_GNR = {"Acciones", "Cedear"}
 ARANCEL = 0.989  # 1 - 1.1% comisión
 INTERVALO_REFRESCO_S = 30 * 60
+
+# --- PROTECCIÓN CON CONTRASEÑA ---
+def check_password():
+    if st.session_state.get("authenticated"):
+        return True
+    
+    st.title("🔐 Dashboard GNR - Cohen")
+    password = st.text_input("Contraseña de acceso:", type="password")
+    
+    if st.button("Ingresar"):
+        if password == st.secrets["Access_pass"]:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Contraseña incorrecta")
+    
+    return False
+
 
 # --- FUNCIONES DE AUTENTICACIÓN Y API ---
 
