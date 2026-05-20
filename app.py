@@ -21,6 +21,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+password = st.text_input("Contraseña de acceso:", type="password")
+
+if st.button("Ingresar"):
+        if password == st.secrets["Access_pass"]:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Contraseña incorrecta")
+    
+    return False
 # --- CONSTANTES ---
 COHEN_BASE = "https://connect.cohen.com.ar"
 TIPOS_GNR = {"Acciones", "Cedear"}
@@ -185,7 +195,9 @@ def fetch_all_api_data():
 def main():
     # Estilo Streamlit para ocultar menú innecesario
     st.markdown("""<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;}</style>""", unsafe_allow_html=True)
-
+    
+    if not check_password():  # ← agregar esta línea
+        return   
     try:
         with st.spinner('Cargando datos de Cohen Connect...'):
             gnr, gr, mep = fetch_all_api_data()
