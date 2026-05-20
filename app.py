@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Dashboard interactivo GNR (Ganancia No Realizada + Realizada) — Acciones y CEDEARs.
-# Genera dashboard_gnr.html y lo abre en el browser. Refresca cada INTERVAL_S segundos.
-
 import streamlit as st
 import json
 import requests
@@ -11,7 +8,7 @@ import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit.components.v1 as components
-from template import HTML_TEMPLATE  # Importamos el string largo del HTML
+from template import HTML_TEMPLATE
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
@@ -21,12 +18,10 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-password = st.text_input("Contraseña de acceso:", type="password")
-
 # --- CONSTANTES ---
 COHEN_BASE = "https://connect.cohen.com.ar"
 TIPOS_GNR = {"Acciones", "Cedear"}
-ARANCEL = 0.989  # 1 - 1.1% comisión
+ARANCEL = 0.989
 INTERVALO_REFRESCO_S = 30 * 60
 
 # --- PROTECCIÓN CON CONTRASEÑA ---
@@ -35,9 +30,9 @@ def check_password():
         return True
     
     st.title("🔐 Dashboard GNR - Cohen")
-    password = st.text_input("Contraseña de acceso:", type="password")
+    password = st.text_input("Contraseña de acceso:", type="password", key="login_password")
     
-    if st.button("Ingresar"):
+    if st.button("Ingresar", key="login_button"):
         if password == st.secrets["Access_pass"]:
             st.session_state.authenticated = True
             st.rerun()
@@ -50,7 +45,6 @@ def check_password():
 # --- FUNCIONES DE AUTENTICACIÓN Y API ---
 
 def obtener_token() -> str:
-    # Nota: En producción, usa st.secrets para no exponer la clave
     user = st.secrets["X_USER"]
     pw = st.secrets["X_PASS"]
     
@@ -75,7 +69,7 @@ def get_mep(token: str) -> float:
     )
     resp.raise_for_status()
     for item in resp.json():
-        if item.get("idMoneda") == 1032:  # DOLAR MEP CONNECT
+        if item.get("idMoneda") == 1032:
             return float(item.get("cotizacionActual") or 0)
     return 0.0
 
@@ -127,7 +121,7 @@ def parsear_comitente(c: dict) -> tuple:
 
 # --- PROCESAMIENTO DE DATOS EN PARALELO ---
 
-@st.cache_data(ttl=1800) # Cache por 30 minutos
+@st.cache_data(ttl=1800)
 def fetch_all_api_data():
     token = obtener_token()
     mep = get_mep(token)
@@ -137,14 +131,10 @@ def fetch_all_api_data():
     gnr_total = []
     gr_total = []
 
-    # Uso de ThreadPool para acelerar las ~100+ peticiones
     with ThreadPoolExecutor(max_workers=20) as executor:
-        # Tareas GNR
         future_to_gnr = {executor.submit(get_posiciones, c["id"], token): c["id"] for c in comitentes}
-        # Tareas GR
         future_to_gr = {executor.submit(get_ganancia_realizada, c["id"], token): c["id"] for c in comitentes}
 
-        # Procesar GNR
         for future in as_completed(future_to_gnr):
             id_com = future_to_gnr[future]
             nro, nombre = cmap.get(id_com, (str(id_com), ""))
@@ -173,7 +163,6 @@ def fetch_all_api_data():
                     })
             except: continue
 
-        # Procesar GR
         for future in as_completed(future_to_gr):
             id_com = future_to_gr[future]
             nro, nombre = cmap.get(id_com, (str(id_com), ""))
@@ -203,17 +192,15 @@ def fetch_all_api_data():
 # --- RENDERIZADO ---
 
 def main():
-    # Estilo Streamlit para ocultar menú innecesario
     st.markdown("""<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;}</style>""", unsafe_allow_html=True)
     
-    if not check_password():  # ← agregar esta línea
-        return   
+    if not check_password():
+        return
+    
     try:
         with st.spinner('Cargando datos de Cohen Connect...'):
             gnr, gr, mep = fetch_all_api_data()
 
-        # Inyectar datos en el HTML_TEMPLATE
-        # Usamos json.dumps para asegurar que el formato sea compatible con JS
         html_final = (HTML_TEMPLATE
             .replace("__DATA_JSON__", json.dumps(gnr))
             .replace("__DATA_GR_JSON__", json.dumps(gr))
@@ -223,16 +210,15 @@ def main():
             .replace("__INTERVAL_S__", str(INTERVALO_REFRESCO_S))
         )
 
-        # Mostrar el componente HTML (Ajusta el height según prefieras)
         components.html(html_final, height=1000, scrolling=True)
         
-        if st.button("🔄 Forzar Actualización"):
+        if st.button("🔄 Forzar Actualización", key="refresh_button"):
             st.cache_data.clear()
             st.rerun()
 
     except Exception as e:
         st.error(f"Error crítico en la aplicación: {e}")
-        if st.button("Reintentar"):
+        if st.button("Reintentar", key="retry_button"):
             st.rerun()
 
 if __name__ == "__main__":
