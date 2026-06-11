@@ -19,6 +19,12 @@ TIPOS_GNR = {"Acciones", "Cedear"}
 ARANCEL = 0.989  # 1 - 1.1% comisión al vender
 INTERVAL_S = 30 * 60  # 30 minutos
 
+EMAILS_AUTORIZADOS = [
+    "federico@qtmcapital.com.ar",
+    "matias@qtmcapital.com.ar",
+    "ciro@qtmcapital.com.ar",
+]
+
 st.set_page_config(
     page_title="Dashboard GNR – Cohen",
     page_icon="📊",
@@ -310,7 +316,7 @@ def cargar_datos():
     st.session_state["loaded_at"] = time.time()
 
 
-# ── HTML Template (idéntico al original) ──────────────────────────────────────
+# ── HTML Template ─────────────────────────────────────────────────────────────
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="es">
@@ -343,6 +349,8 @@ table th:not(.sort-asc):not(.sort-desc):not(.nosort)::after{content:" \2195";col
 .autocomplete-item:hover,.autocomplete-item.active{background:#e9ecef}
 .copy-btn{font-size:.72rem;padding:2px 8px}
 input[type=checkbox]{width:15px;height:15px;cursor:pointer}
+.btn-logout{font-size:.7rem;padding:2px 10px;border-radius:6px;background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.3);cursor:pointer;transition:background .15s}
+.btn-logout:hover{background:rgba(255,255,255,.28)}
 </style>
 </head>
 <body>
@@ -350,11 +358,14 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
 <nav class="navbar navbar-dark py-2 mb-4">
   <div class="container-fluid">
     <span class="navbar-brand fw-bold fs-6">Dashboard GNR &mdash; Cohen</span>
-    <span class="text-white-50" style="font-size:.72rem">
+    <span class="text-white-50 d-flex align-items-center gap-2" style="font-size:.72rem">
       MEP: <strong class="text-warning">$ __MEP_DISPLAY__</strong>
       &nbsp;|&nbsp; Arancel: 1.1%
       &nbsp;|&nbsp; Actualizado: __TS__
       &nbsp;|&nbsp; Prox: <span id="countdown"></span>
+      &nbsp;|&nbsp; 👤 <span class="text-white-50">__USER_NAME__</span>
+      &nbsp;
+      <button class="btn-logout" onclick="window.parent.location.href='/_stcore/logout'">Salir</button>
     </span>
   </div>
 </nav>
@@ -1045,7 +1056,9 @@ def _js_safe(data) -> str:
     return json.dumps(data, ensure_ascii=False, default=str).replace("<", "\\u003c")
 
 
-def generar_html(posiciones: list, gr: list, mep: float, ts: str) -> str:
+def generar_html(
+    posiciones: list, gr: list, mep: float, ts: str, user_name: str = ""
+) -> str:
     return (
         HTML_TEMPLATE.replace("__DATA_JSON__", _js_safe(posiciones))
         .replace("__DATA_GR_JSON__", _js_safe(gr))
@@ -1053,16 +1066,15 @@ def generar_html(posiciones: list, gr: list, mep: float, ts: str) -> str:
         .replace("__MEP_DISPLAY__", f"{mep:,.2f}")
         .replace("__TS__", ts)
         .replace("__INTERVAL_S__", str(INTERVAL_S))
+        .replace("__USER_NAME__", user_name)
     )
 
 
 # ── Autenticación ─────────────────────────────────────────────────────────────
 
 
-def check_password() -> bool:
-    """Devuelve True si el usuario ya ingresó la contraseña correcta."""
-    if st.session_state.get("autenticado"):
-        return True
+def check_auth() -> bool:
+    """Devuelve True si el usuario está autenticado y autorizado."""
 
     st.markdown(
         """
@@ -1084,40 +1096,60 @@ def check_password() -> bool:
             margin-bottom: .25rem;
         }
         .login-sub { font-size: .82rem; color: #6c757d; margin-bottom: 1.5rem; }
+        .stButton > button {
+            background: linear-gradient(135deg,#1a1a2e,#16213e);
+            color: white; border: none; border-radius: 8px;
+            padding: .6rem 1.2rem; font-size: .9rem; cursor: pointer;
+            width: 100%;
+        }
+        .stButton > button:hover { opacity: 0.85; }
     </style>
-    <div class="login-wrap">
-      <div class="login-box">
-        <div class="login-logo">📊 GNR Cohen</div>
-        <div class="login-sub">Dashboard de Ganancia No Realizada &amp; Realizada</div>
-      </div>
-    </div>
     """,
         unsafe_allow_html=True,
     )
 
-    with st.form("login_form"):
-        st.markdown("#### 🔒 Acceso restringido")
-        pwd = st.text_input(
-            "Contraseña", type="password", placeholder="Ingresá la contraseña..."
+    # ── No logueado ───────────────────────────────────────────────────────────
+    if not st.user.is_logged_in:
+        st.markdown(
+            """
+        <div class="login-wrap">
+          <div class="login-box">
+            <div class="login-logo">📊 GNR Cohen</div>
+            <div class="login-sub">Dashboard de Ganancia No Realizada &amp; Realizada</div>
+          </div>
+        </div>
+        """,
+            unsafe_allow_html=True,
         )
-        submitted = st.form_submit_button("Ingresar", use_container_width=True)
+        st.button("Ingresar con Google", on_click=st.login, use_container_width=True)
+        return False
 
-    if submitted:
-        if pwd == st.secrets["DASHBOARD_PASS"]:
-            st.session_state["autenticado"] = True
-            st.rerun()
-        else:
-            st.error("❌ Contraseña incorrecta.")
+    # ── Logueado pero no autorizado ───────────────────────────────────────────
+    if st.user.email not in EMAILS_AUTORIZADOS:
+        st.markdown(
+            """
+        <div class="login-wrap">
+          <div class="login-box">
+            <div class="login-logo">📊 GNR Cohen</div>
+            <div class="login-sub">Dashboard de Ganancia No Realizada &amp; Realizada</div>
+          </div>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+        st.error(f"❌ Tu cuenta ({st.user.email}) no tiene acceso a este dashboard.")
+        st.button("Cerrar sesión", on_click=st.logout, use_container_width=True)
+        return False
 
-    return False
+    # ── Autorizado ────────────────────────────────────────────────────────────
+    return True
 
 
-if not check_password():
+if not check_auth():
     st.stop()
 
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 
-# Ocultar el header/footer de Streamlit y agregar botón flotante para colapsar sidebar
 st.markdown(
     """
 <style>
@@ -1129,7 +1161,6 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
-
 
 # ── Auto-refresh del lado Python ───────────────────────────────────────────────
 needs_refresh = False
@@ -1145,18 +1176,17 @@ if needs_refresh:
         st.error(f"❌ Error al conectar con la API de Cohen: {e}")
         st.stop()
 
-
 # ── Renderizar el HTML completo como componente ────────────────────────────────
 gnr = st.session_state.get("gnr", [])
 gr = st.session_state.get("gr", [])
 mep = st.session_state.get("mep", 0.0)
 ts = st.session_state.get("ts", "")
+user_name = st.user.name  # nombre del usuario autenticado
 
-html_content = generar_html(gnr, gr, mep, ts)
+html_content = generar_html(gnr, gr, mep, ts, user_name)
 
 st.components.v1.html(html_content, height=900, scrolling=True)
 
 # ── Auto-rerun de Streamlit para refrescar datos ───────────────────────────────
-# Verifica cada 60s si ya pasaron los 30 minutos
 time.sleep(60)
 st.rerun()
