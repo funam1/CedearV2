@@ -187,11 +187,13 @@ tbody tr:hover{background:var(--sur2)}
     <div class="spacer"></div>
     <button class="hoy-btn" id="btnHoy">&#128197; HOY</button>
     <button class="ibtn" id="btnTheme" title="Modo claro/oscuro">&#9789;</button>
+    <button class="ibtn" id="btnLogout" title="Cerrar sesión" onclick="window.parent.location.href='/_stcore/logout'">&#9099;</button>
   </div>
   <div class="meta">
     <span id="metaRango"></span>
     <span id="metaTs"></span>
     <span>Refresco: <b id="countdown"></b></span>
+    <span>&#128100; <b>__USER_NAME__</b></span>
   </div>
 </div>
 
@@ -1024,16 +1026,11 @@ function openTf(idx) {
     row("Alta", d.fecha_alta || "—") +
     (d.observacion ? row("Observación", d.observacion) : "");
   document.getElementById("dw-body").innerHTML = bdy;
-  _copyText = icon + " TRANSFERENCIA — " + (d.cliente || d.nro_cuenta) + "
-" +
-    "Importe: " + d.moneda + " " + fmtM(d.importe) + "
-" +
-    "Estado: " + d.estado_label + (d.estado && d.estado !== d.estado_label ? " (" + d.estado + ")" : "") + "
-" +
-    "Banco: " + (d.banco || "—") + "  Cta: " + (d.cuenta || "—") + "
-" +
-    "CBU: " + (d.cbu || "—") + "
-" +
+  _copyText = icon + " TRANSFERENCIA — " + (d.cliente || d.nro_cuenta) + "\n" +
+    "Importe: " + d.moneda + " " + fmtM(d.importe) + "\n" +
+    "Estado: " + d.estado_label + (d.estado && d.estado !== d.estado_label ? " (" + d.estado + ")" : "") + "\n" +
+    "Banco: " + (d.banco || "—") + "  Cta: " + (d.cuenta || "—") + "\n" +
+    "CBU: " + (d.cbu || "—") + "\n" +
     "Fecha: " + d.fecha;
   openDrawer();
 }
@@ -1055,12 +1052,9 @@ function openFci(idx) {
     row("Cotización", fmtM(d.cotizacion, 6)) +
     row("Fecha", d.fecha);
   document.getElementById("dw-body").innerHTML = bdy;
-  _copyText = icon + " FCI " + d.solicitud_tipo.toUpperCase() + " — " + (d.cliente || d.nro_cuenta) + "
-" +
-    "Fondo: " + d.fondo + "
-" +
-    "Importe: " + d.moneda + " " + fmtM(d.importe) + "
-" +
+  _copyText = icon + " FCI " + d.solicitud_tipo.toUpperCase() + " — " + (d.cliente || d.nro_cuenta) + "\n" +
+    "Fondo: " + d.fondo + "\n" +
+    "Importe: " + d.moneda + " " + fmtM(d.importe) + "\n" +
     "Fecha: " + d.fecha;
   openDrawer();
 }
@@ -1078,10 +1072,8 @@ function openIng(idx) {
     row("Fecha", d.fecha) +
     row("Vencimiento", d.fecha_vto || "—");
   document.getElementById("dw-body").innerHTML = bdy;
-  _copyText = icon + " " + d.tipo.toUpperCase() + " — " + (d.cliente || d.nro_cuenta) + "
-" +
-    "Importe: " + d.moneda + " " + fmtM(d.importe) + "
-" +
+  _copyText = icon + " " + d.tipo.toUpperCase() + " — " + (d.cliente || d.nro_cuenta) + "\n" +
+    "Importe: " + d.moneda + " " + fmtM(d.importe) + "\n" +
     "Fecha: " + d.fecha;
   openDrawer();
 }

@@ -369,36 +369,98 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Dashboard GNR - Cohen</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
-body{background:#f0f2f5;font-size:.875rem}
-.navbar{background:linear-gradient(135deg,#1a1a2e,#16213e)}
-.kpi-card{border:none;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+/* ═══════════════════════ TOKENS (paleta QTM Capital) ═══════════════════════ */
+:root{
+  --navy:#0F2044; --navy-deep:#0b1830; --gold:#C9A84C; --gold-soft:#e3cd8a;
+  --ok:#2e9e6b;   --ok-bg:rgba(46,158,107,.14);
+  --warn:#c98a1c;  --warn-bg:rgba(201,138,28,.16);
+  --bad:#c4453f;   --bad-bg:rgba(196,69,63,.14);
+  --neu:#6b7fa3;   --neu-bg:rgba(107,127,163,.14);
+  --r:12px;
+  --fh:'DM Serif Display',Georgia,serif;
+  --fb:'DM Sans',-apple-system,Segoe UI,sans-serif;
+}
+body[data-t="dark"]{
+  --bg:#0b1322; --sur:#121d30; --sur2:#172541; --sur3:#1e2e50;
+  --tx:#eef1f6; --mu:#7a8fb5; --bo:rgba(255,255,255,.09);
+  --hd:linear-gradient(135deg,#0b1830,#0F2044 55%,#16243a);
+  --sh:0 8px 24px rgba(0,0,0,.35);
+}
+body[data-t="light"]{
+  --bg:#f3f5f9; --sur:#ffffff; --sur2:#f0f2f8; --sur3:#e8eaf2;
+  --tx:#16213e; --mu:#5c6880; --bo:#dde0ec;
+  --hd:linear-gradient(135deg,#0F2044,#16345c 60%,#1b3a66);
+  --sh:0 4px 16px rgba(15,32,68,.08);
+}
+body{
+  background:var(--bg);color:var(--tx);font-family:var(--fb);font-size:.875rem;transition:background .2s,color .2s;
+  --bs-body-bg:var(--bg); --bs-body-color:var(--tx); --bs-emphasis-color:var(--tx);
+  --bs-secondary-color:var(--mu); --bs-tertiary-color:var(--mu);
+  --bs-border-color:var(--bo); --bs-secondary-bg:var(--sur2); --bs-tertiary-bg:var(--sur2);
+  --bs-primary:var(--gold);   --bs-primary-rgb:201,168,76;
+  --bs-success:var(--ok);     --bs-success-rgb:46,158,107;
+  --bs-danger:var(--bad);     --bs-danger-rgb:196,69,63;
+  --bs-warning:var(--warn);   --bs-warning-rgb:201,138,28;
+  --bs-secondary:var(--neu);  --bs-secondary-rgb:107,127,163;
+  --bs-info:var(--neu);       --bs-info-rgb:107,127,163;
+  --bs-light:var(--sur2);     --bs-light-rgb:23,37,65;
+  --bs-dark:var(--sur);       --bs-dark-rgb:18,29,48;
+}
+.navbar{background:var(--hd)!important}
+.navbar-brand{font-family:var(--fh)}
+.ibtn{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.18);color:#fff;
+  width:32px;height:32px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;
+  cursor:pointer;font-size:.9rem;transition:background .15s}
+.ibtn:hover{background:rgba(255,255,255,.24)}
+.card,.kpi-card{background:var(--sur)!important;border:1px solid var(--bo)!important;box-shadow:var(--sh)!important;color:var(--tx)}
 .kpi-value{font-size:1.5rem;font-weight:700}
-.kpi-label{font-size:.72rem;color:#6c757d;text-transform:uppercase;letter-spacing:.05em}
-.gain{color:#198754!important}.loss{color:#dc3545!important}
-.badge-gain{background:#d1e7dd;color:#0a3622}.badge-loss{background:#f8d7da;color:#58151c}
+.kpi-label{font-size:.72rem;color:var(--mu);text-transform:uppercase;letter-spacing:.05em}
+.gain{color:var(--ok)!important}.loss{color:var(--bad)!important}
+.badge-gain{background:var(--ok-bg);color:var(--ok)}.badge-loss{background:var(--bad-bg);color:var(--bad)}
+.table{--bs-table-bg:var(--sur);--bs-table-color:var(--tx);--bs-table-striped-bg:var(--sur2);
+  --bs-table-hover-bg:var(--sur2);--bs-table-hover-color:var(--tx);--bs-table-border-color:var(--bo)}
 .table-wrapper{max-height:520px;overflow-y:auto}
-table th{position:sticky;top:0;background:#fff;z-index:1;cursor:pointer;user-select:none;white-space:nowrap}
-table th:hover{background:#f0f2f5}
+table th{position:sticky;top:0;background:var(--sur2)!important;color:var(--mu);z-index:1;cursor:pointer;
+  user-select:none;white-space:nowrap;font-size:.67rem;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
+table th:hover{color:var(--tx)}
 table th.sort-asc::after{content:" \2191"}
 table th.sort-desc::after{content:" \2193"}
-table th:not(.sort-asc):not(.sort-desc):not(.nosort)::after{content:" \2195";color:#adb5bd;font-size:.7rem}
+table th:not(.sort-asc):not(.sort-desc):not(.nosort)::after{content:" \2195";color:var(--mu);font-size:.7rem}
 .heat-cell{width:80px;min-width:80px;text-align:center;font-size:.7rem;padding:3px 4px!important;border-radius:4px}
 .heat-ticker{font-size:.65rem;font-weight:700;white-space:nowrap;max-width:75px;overflow:hidden;text-overflow:ellipsis}
-.section-title{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#6c757d;margin-bottom:.75rem}
+.section-title{font-family:var(--fb);font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--mu);margin-bottom:.75rem}
+.nav-tabs{border-color:var(--bo)}
+.nav-tabs .nav-link{color:var(--mu);border:none;border-bottom:2px solid transparent;font-weight:600;transition:color .15s,border-color .15s}
+.nav-tabs .nav-link:hover{color:var(--tx);border-color:transparent}
+.nav-tabs .nav-link.active{color:var(--tx)!important;background:transparent!important;border-color:transparent transparent var(--gold)!important}
+.tab-content{background:var(--sur)!important;border:1px solid var(--bo)!important}
+.form-control,.form-select{background:var(--sur2);border-color:var(--bo);color:var(--tx)}
+.form-control:focus,.form-select:focus{background:var(--sur2);border-color:var(--gold);color:var(--tx);box-shadow:0 0 0 .2rem rgba(201,168,76,.15)}
+.form-check-input{background-color:var(--sur2);border-color:var(--mu)}
+.form-check-input:checked{background-color:var(--gold);border-color:var(--gold)}
+.form-check-label{color:var(--tx)}
+.modal-content{background:var(--sur);color:var(--tx);border:1px solid var(--bo)}
+.modal-header,.modal-footer{border-color:var(--bo)}
+.btn-close{filter:var(--btn-close-filter,none)}
+body[data-t="dark"] .btn-close{filter:invert(1) grayscale(100%) brightness(200%)}
 .autocomplete-wrap{position:relative}
-.autocomplete-list{position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #dee2e6;border-radius:4px;max-height:200px;overflow-y:auto;z-index:100;display:none}
+.autocomplete-list{position:absolute;top:100%;left:0;right:0;background:var(--sur);border:1px solid var(--bo);
+  border-radius:8px;max-height:200px;overflow-y:auto;z-index:100;display:none;box-shadow:var(--sh)}
 .autocomplete-item{padding:5px 10px;cursor:pointer;font-size:.82rem}
-.autocomplete-item:hover,.autocomplete-item.active{background:#e9ecef}
+.autocomplete-item:hover,.autocomplete-item.active{background:var(--sur2)}
 .copy-btn{font-size:.72rem;padding:2px 8px}
 input[type=checkbox]{width:15px;height:15px;cursor:pointer}
 .btn-logout{font-size:.7rem;padding:2px 10px;border-radius:6px;background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.3);cursor:pointer;transition:background .15s}
 .btn-logout:hover{background:rgba(255,255,255,.28)}
 </style>
 </head>
-<body>
+<body data-t="dark">
 
 <nav class="navbar navbar-dark py-2 mb-4">
   <div class="container-fluid">
@@ -410,6 +472,7 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
       &nbsp;|&nbsp; Prox: <span id="countdown"></span>
       &nbsp;|&nbsp; 👤 <span class="text-white-50">__USER_NAME__</span>
       &nbsp;
+      <button class="ibtn" id="btnTheme" title="Modo claro/oscuro">&#9789;</button>
       <button class="btn-logout" onclick="window.parent.location.href='/_stcore/logout'">Salir</button>
     </span>
   </div>
@@ -677,15 +740,15 @@ function renderKPIs(){
   const gan = DATA.filter(d=>d.pnl_ars>0).length;
   const per = DATA.filter(d=>d.pnl_ars<0).length;
   document.getElementById('kpis').innerHTML=[
-    {l:'Posiciones',    v:fmt(DATA.length),   s:`${gan} ganadoras / ${per} perdedoras`, color:'#0d6efd'},
-    {l:'Valor ARS',     v:'$ '+fmt(totalValor), s:'Precio mercado',                     color:'#0d6efd'},
-    {l:'Valor neto ARS',v:'$ '+fmt(totalNeto),  s:'Descontando 1.1% arancel',           color:'#0d6efd'},
-    {l:'P&L ARS',       v:'$ '+fmt(totalPnlARS),s:fmtPct(pct)+' sobre costo',          color:totalPnlARS>=0?'#198754':'#dc3545'},
-    {l:'P&L USD',       v:'U$S '+fmt(totalPnlUSD,2),s:'Al tipo MEP',                   color:totalPnlUSD>=0?'#198754':'#dc3545'},
+    {l:'Posiciones',    v:fmt(DATA.length),   s:`${gan} ganadoras / ${per} perdedoras`, color:'var(--gold)'},
+    {l:'Valor ARS',     v:'$ '+fmt(totalValor), s:'Precio mercado',                     color:'var(--gold)'},
+    {l:'Valor neto ARS',v:'$ '+fmt(totalNeto),  s:'Descontando 1.1% arancel',           color:'var(--gold)'},
+    {l:'P&L ARS',       v:'$ '+fmt(totalPnlARS),s:fmtPct(pct)+' sobre costo',          color:totalPnlARS>=0?'var(--ok)':'var(--bad)'},
+    {l:'P&L USD',       v:'U$S '+fmt(totalPnlUSD,2),s:'Al tipo MEP',                   color:totalPnlUSD>=0?'var(--ok)':'var(--bad)'},
   ].map(c=>`<div class="col-sm-6 col-xl"><div class="card kpi-card p-3">
     <div class="kpi-label">${c.l}</div>
     <div class="kpi-value mt-1" style="color:${c.color}">${c.v}</div>
-    <div style="font-size:.68rem;color:#6c757d">${c.s}</div></div></div>`).join('');
+    <div style="font-size:.68rem;color:var(--mu)">${c.s}</div></div></div>`).join('');
 }
 
 // ── Tabla completa ─────────────────────────────────────────────────────────
@@ -708,7 +771,7 @@ function renderMainRows(rows){
   document.getElementById('main-tbody').innerHTML=rows.map(d=>`
     <tr>
       <td><input type="checkbox" class="row-chk" data-nro="${d.nro_cuenta}" data-cliente="${d.cliente}" data-ticker="${d.ticker}" data-cant="${d.cantidad}"></td>
-      <td><span class="fw-semibold">${d.nro_cuenta}</span> <span class="text-muted" style="font-size:.78rem">${d.cliente.substring(0,20)}</span></td>
+      <td><span class="fw-semibold">${d.nro_cuenta}</span> <span style="font-size:.78rem;color:var(--tx)">${d.cliente.substring(0,20)}</span></td>
       <td><strong>${d.ticker}</strong></td>
       <td><span class="badge bg-secondary">${d.tipo}</span></td>
       <td class="text-end">${fmt(d.cantidad,2)}</td>
@@ -775,7 +838,7 @@ function renderCliente(nro){
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Posiciones</div><div class="kpi-value">${rows.length}</div></div></div>
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor ARS</div><div class="kpi-value text-primary">$ ${fmt(tv)}</div></div></div>
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor neto ARS</div><div class="kpi-value text-info">$ ${fmt(tn)}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div><div style="font-size:.68rem;color:#6c757d">${fmtPct(pct)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div><div style="font-size:.68rem;color:var(--mu)">${fmtPct(pct)}</div></div></div>
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L USD</div><div class="kpi-value ${cls(tu)}">U$S ${fmt(tu,2)}</div></div></div>`;
   document.getElementById('tbody-cliente').innerHTML=
     [...rows].sort((a,b)=>(b.valor_ars||0)-(a.valor_ars||0)).map(d=>`
@@ -818,7 +881,7 @@ function renderTicker(ticker){
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Precio ARS</div><div class="kpi-value text-primary">$ ${fmt(precio,2)}</div></div></div>
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor total</div><div class="kpi-value">$ ${fmt(tv)}</div></div></div>
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor neto</div><div class="kpi-value text-info">$ ${fmt(tn)}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div><div style="font-size:.68rem;color:#6c757d">${fmtPct(pct)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div><div style="font-size:.68rem;color:var(--mu)">${fmtPct(pct)}</div></div></div>
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L USD</div><div class="kpi-value ${cls(tu)}">U$S ${fmt(tu,2)}</div></div></div>`;
   document.getElementById('tbody-ticker').innerHTML=
     [...rows].sort((a,b)=>(b.pnl_usd||0)-(a.pnl_usd||0)).map(d=>`
@@ -838,20 +901,23 @@ function renderTicker(ticker){
 
 // ── Charts ─────────────────────────────────────────────────────────────────
 function buildCharts(){
+  const gridColor='rgba(122,143,181,.15)', textColor='#7a8fb5';
+  Chart.defaults.color=textColor;
+  Chart.defaults.borderColor=gridColor;
   const sorted=[...DATA].sort((a,b)=>b.pnl_ars-a.pnl_ars);
   const makeBar=(id,rows,color)=>new Chart(document.getElementById(id),{type:'bar',
     data:{labels:rows.map(d=>`${d.ticker}(${d.nro_cuenta})`),datasets:[{data:rows.map(d=>Math.abs(d.pnl_ars)),backgroundColor:color,borderRadius:4}]},
-    options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{ticks:{callback:v=>'$'+fmt(v)}}}}});
-  makeBar('chart-gainers',sorted.slice(0,10),'#198754');
-  makeBar('chart-losers',sorted.slice(-10).reverse(),'#dc3545');
+    options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{grid:{color:gridColor},ticks:{color:textColor,callback:v=>'$'+fmt(v)}},y:{grid:{color:gridColor},ticks:{color:textColor}}}}});
+  makeBar('chart-gainers',sorted.slice(0,10),'#2e9e6b');
+  makeBar('chart-losers',sorted.slice(-10).reverse(),'#c4453f');
   const tkMap={};
   DATA.forEach(d=>{if(!tkMap[d.ticker])tkMap[d.ticker]={pnl:0,n:0};tkMap[d.ticker].pnl+=d.pnl_ars||0;tkMap[d.ticker].n++;});
   const tkArr=Object.entries(tkMap).sort((a,b)=>b[1].pnl-a[1].pnl);
   const makeBar2=(id,rows,color)=>new Chart(document.getElementById(id),{type:'bar',
     data:{labels:rows.map(([t,v])=>`${t}(${v.n}cl)`),datasets:[{data:rows.map(([,v])=>Math.abs(v.pnl)),backgroundColor:color,borderRadius:4}]},
     options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{ticks:{callback:v=>'$'+fmt(v)}}}}});
-  makeBar2('chart-ticker-gain',tkArr.slice(0,10),'#0d6efd');
-  makeBar2('chart-ticker-loss',tkArr.slice(-10).reverse(),'#fd7e14');
+  makeBar2('chart-ticker-gain',tkArr.slice(0,10),'#C9A84C');
+  makeBar2('chart-ticker-loss',tkArr.slice(-10).reverse(),'#c98a1c');
 }
 
 // ── Mapa calor ─────────────────────────────────────────────────────────────
@@ -864,12 +930,12 @@ function buildHeatmap(){
   const clientes=Object.keys(cm).sort((a,b)=>cm[b].v-cm[a].v);
   const tickers=Object.keys(tm).sort((a,b)=>tm[b].v-tm[a].v).slice(0,40);
   const lkp={};DATA.forEach(d=>{lkp[`${d.nro_cuenta}|${d.ticker}`]=d.pnl_pct_usd;});
-  const hc=p=>{if(p==null)return'#f0f2f5';if(p>=20)return'#0a3622';if(p>=10)return'#198754';if(p>0)return'#d1e7dd';if(p==0)return'#f8f9fa';if(p>-10)return'#f8d7da';if(p>-20)return'#dc3545';return'#58151c';};
-  const htc=p=>{if(p==null)return'#6c757d';if(p>=10||p<=-20)return'#fff';return'#212529';};
+  const hc=p=>{if(p==null)return'transparent';if(p>=20)return'#163f2d';if(p>=10)return'#2e9e6b';if(p>0)return'rgba(46,158,107,.25)';if(p==0)return'transparent';if(p>-10)return'rgba(196,69,63,.25)';if(p>-20)return'#c4453f';return'#4a1a17';};
+  const htc=p=>{if(p==null)return'var(--mu)';if(p>=10||p<=-20)return'#fff';return'var(--tx)';};
   document.getElementById('heat-head').innerHTML='<tr><th style="min-width:120px">Cliente</th>'+tickers.map(t=>`<th style="font-size:.62rem;font-weight:700;white-space:nowrap;max-width:70px;overflow:hidden;text-overflow:ellipsis" title="${t}">${t}</th>`).join('')+'</tr>';
   document.getElementById('heat-body').innerHTML=clientes.map(nro=>{
     const nombre=cm[nro].n.substring(0,16);
-    return`<tr><td style="white-space:nowrap;font-size:.7rem"><strong>${nro}</strong> ${nombre}</td>${tickers.map(t=>{const p=lkp[`${nro}|${t}`];if(p==null)return`<td style="background:#f0f2f5"></td>`;return`<td class="heat-cell" style="background:${hc(p)};color:${htc(p)}" title="${t}: ${fmtPct(p)}">${fmtPct(p)}</td>`;}).join('')}</tr>`;
+    return`<tr><td style="white-space:nowrap;font-size:.7rem"><strong>${nro}</strong> ${nombre}</td>${tickers.map(t=>{const p=lkp[`${nro}|${t}`];if(p==null)return`<td style="background:var(--sur2)"></td>`;return`<td class="heat-cell" style="background:${hc(p)};color:${htc(p)}" title="${t}: ${fmtPct(p)}">${fmtPct(p)}</td>`;}).join('')}</tr>`;
   }).join('');
 }
 
@@ -928,7 +994,7 @@ function renderGR(){
 
   document.getElementById('gr-tbody').innerHTML=rows.map(d=>`
     <tr>
-      <td><span class="fw-semibold">${d.nro_cuenta}</span> <span class="text-muted" style="font-size:.75rem">${d.cliente.substring(0,18)}</span></td>
+      <td><span class="fw-semibold">${d.nro_cuenta}</span> <span style="font-size:.75rem;color:var(--tx)">${d.cliente.substring(0,18)}</span></td>
       <td><strong>${d.ticker}</strong></td>
       <td><span class="badge bg-secondary">${d.tipo}</span></td>
       <td class="text-end">${d.ops}</td>
@@ -959,18 +1025,18 @@ function abrirOrdenDesdeAlertas(rows, operacion){
 function renderAlertas(){
   const ul=-Math.abs(Number(document.getElementById('umbral-loss').value)||10);
   const ug= Math.abs(Number(document.getElementById('umbral-gain').value)||20);
-  const losses=DATA.filter(d=>d.pnl_pct_ars<=ul).sort((a,b)=>a.pnl_pct_ars-b.pnl_pct_ars);
-  const gains =DATA.filter(d=>d.pnl_pct_ars>=ug).sort((a,b)=>b.pnl_pct_ars-a.pnl_pct_ars);
+  const losses=DATA.filter(d=>d.pnl_pct_ars<=ul).sort((a,b)=>a.pnl_pct_usd-b.pnl_pct_usd);
+  const gains =DATA.filter(d=>d.pnl_pct_ars>=ug).sort((a,b)=>b.pnl_pct_usd-a.pnl_pct_usd);
 
-  const tbl=(rows,op)=>`
+  const tbl=(rows,tableId)=>`
     <div class="table-wrapper">
-      <table class="table table-sm table-hover"><thead><tr>
+      <table class="table table-sm table-hover" id="${tableId}"><thead><tr>
         <th>Cuenta</th><th>Ticker</th><th>Tipo</th><th class="text-end">Cant.</th>
         <th class="text-end">Valor Neto USD</th><th class="text-end">P&L USD</th>
         <th class="text-end">P&L % USD</th>
       </tr></thead>
       <tbody>${rows.map(d=>`<tr>
-        <td><strong>${d.nro_cuenta}</strong> <span class="text-muted" style="font-size:.75rem">${d.cliente.substring(0,20)}</span></td>
+        <td><strong>${d.nro_cuenta}</strong> <span style="font-size:.75rem;color:var(--tx)">${d.cliente.substring(0,20)}</span></td>
         <td><strong>${d.ticker}</strong></td><td>${d.tipo}</td>
         <td class="text-end">${fmt(d.cantidad,2)}</td>
         <td class="text-end">${d.valor_neto_usd!=null?fmt(d.valor_neto_usd,0):'-'}</td>
@@ -986,21 +1052,23 @@ function renderAlertas(){
         <div class="d-flex align-items-center mb-2 gap-2">
           <span class="badge bg-danger">${losses.length}</span>
           <span class="section-title mb-0">Perdidas > ${Math.abs(ul)}%</span>
-          <button class="btn btn-sm btn-warning ms-auto" onclick="abrirOrdenDesdeAlertas(${JSON.stringify(losses.map(d=>({nro_cuenta:d.nro_cuenta,ticker:d.ticker})))}, 'VENTA')">
+          <button class="btn btn-sm btn-outline-primary copy-btn ms-auto" onclick="copyTable('alertas-loss-table')">Copiar</button>
+          <button class="btn btn-sm btn-warning" onclick="abrirOrdenDesdeAlertas(${JSON.stringify(losses.map(d=>({nro_cuenta:d.nro_cuenta,ticker:d.ticker})))}, 'VENTA')">
             Orden WA Masiva
           </button>
         </div>
-        ${tbl(losses,'VENTA')}
+        ${tbl(losses,'alertas-loss-table')}
       </div>
       <div class="col-lg-6">
         <div class="d-flex align-items-center mb-2 gap-2">
           <span class="badge bg-success">${gains.length}</span>
           <span class="section-title mb-0">Ganancias > ${ug}%</span>
-          <button class="btn btn-sm btn-warning ms-auto" onclick="abrirOrdenDesdeAlertas(${JSON.stringify(gains.map(d=>({nro_cuenta:d.nro_cuenta,ticker:d.ticker})))}, 'VENTA')">
+          <button class="btn btn-sm btn-outline-primary copy-btn ms-auto" onclick="copyTable('alertas-gain-table')">Copiar</button>
+          <button class="btn btn-sm btn-warning" onclick="abrirOrdenDesdeAlertas(${JSON.stringify(gains.map(d=>({nro_cuenta:d.nro_cuenta,ticker:d.ticker})))}, 'VENTA')">
             Orden WA Masiva
           </button>
         </div>
-        ${tbl(gains,'VENTA')}
+        ${tbl(gains,'alertas-gain-table')}
       </div>
     </div>`;
 }
@@ -1076,6 +1144,22 @@ function copiarOrden(){
   });
 }
 document.getElementById('modalOrden').addEventListener('show.bs.modal',()=>generarOrden());
+
+// ── Tema claro/oscuro ──────────────────────────────────────────────────────
+function applyTheme(t){
+  document.body.setAttribute('data-t',t);
+  try{localStorage.setItem('qtm_t',t);}catch(e){}
+  document.getElementById('btnTheme').innerHTML=(t==='dark')?'&#9728;':'&#9789;';
+}
+(function(){
+  let s=null;
+  try{s=localStorage.getItem('qtm_t');}catch(e){}
+  if(!s) s=(window.matchMedia&&window.matchMedia('(prefers-color-scheme:light)').matches)?'light':'dark';
+  applyTheme(s);
+})();
+document.getElementById('btnTheme').addEventListener('click',()=>{
+  applyTheme(document.body.getAttribute('data-t')==='dark'?'light':'dark');
+});
 
 // ── Auto-refresh countdown ─────────────────────────────────────────────────
 const REFRESH_S=__INTERVAL_S__;
@@ -1198,7 +1282,8 @@ if not check_auth():
 st.markdown(
     """
 <style>
-    #MainMenu, header, footer {visibility: hidden;}
+    #MainMenu, footer {visibility: hidden;}
+    header[data-testid="stHeader"] {background: transparent;}
     .block-container { padding: 0 !important; max-width: 100% !important; }
     iframe { border: none !important; }
 </style>
