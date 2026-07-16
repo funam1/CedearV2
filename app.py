@@ -1025,8 +1025,8 @@ function abrirOrdenDesdeAlertas(rows, operacion){
 function renderAlertas(){
   const ul=-Math.abs(Number(document.getElementById('umbral-loss').value)||10);
   const ug= Math.abs(Number(document.getElementById('umbral-gain').value)||20);
-  const losses=DATA.filter(d=>d.pnl_pct_ars<=ul).sort((a,b)=>a.pnl_pct_usd-b.pnl_pct_usd);
-  const gains =DATA.filter(d=>d.pnl_pct_ars>=ug).sort((a,b)=>b.pnl_pct_usd-a.pnl_pct_usd);
+  const losses=DATA.filter(d=>d.pnl_pct_usd<=ul).sort((a,b)=>a.pnl_pct_usd-b.pnl_pct_usd);
+  const gains =DATA.filter(d=>d.pnl_pct_usd>=ug).sort((a,b)=>b.pnl_pct_usd-a.pnl_pct_usd);
 
   const tbl=(rows,tableId)=>`
     <div class="table-wrapper">
@@ -1284,23 +1284,58 @@ st.markdown(
 <style>
     #MainMenu, footer {visibility: hidden;}
     header[data-testid="stHeader"] {background: transparent;}
-    .block-container { padding: 0 !important; max-width: 100% !important; }
+    .block-container { padding: 1rem 1.5rem 0 !important; max-width: 100% !important; }
     iframe { border: none !important; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-# ── Menú lateral ─────────────────────────────────────────────────────────────
 user_name = st.user.name  # nombre del usuario autenticado
 
-st.sidebar.markdown("### 📊 Dashboards QTM")
-pagina = st.sidebar.radio(
-    "Dashboard", ["CEDEAR / GNR", "Transferencias"], label_visibility="collapsed"
-)
-st.sidebar.markdown("---")
-st.sidebar.caption(f"👤 {user_name}")
-st.sidebar.button("Cerrar sesión", on_click=st.logout, use_container_width=True)
+# ── Selección de dashboard ────────────────────────────────────────────────────
+# No se llama a ninguna API hasta que el usuario elige explícitamente qué
+# dashboard quiere ver (CEDEAR/GNR es mucho más lento de cargar que Transferencias).
+if "pagina" not in st.session_state:
+    st.session_state["pagina"] = None
+
+if st.session_state["pagina"] is None:
+    st.markdown("## 📊 Dashboards QTM Capital")
+    st.caption(f"👤 {user_name}")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📈 CEDEAR / GNR", use_container_width=True, type="primary"):
+            st.session_state["pagina"] = "CEDEAR / GNR"
+            st.rerun()
+    with col2:
+        if st.button("💸 Transferencias", use_container_width=True, type="primary"):
+            st.session_state["pagina"] = "Transferencias"
+            st.rerun()
+    st.button("Cerrar sesión", on_click=st.logout)
+    st.stop()
+
+pagina = st.session_state["pagina"]
+
+nav1, nav2, nav3, nav4 = st.columns([2, 2, 3, 1.3])
+with nav1:
+    if st.button(
+        "📈 CEDEAR / GNR",
+        use_container_width=True,
+        type="primary" if pagina == "CEDEAR / GNR" else "secondary",
+    ):
+        st.session_state["pagina"] = "CEDEAR / GNR"
+        st.rerun()
+with nav2:
+    if st.button(
+        "💸 Transferencias",
+        use_container_width=True,
+        type="primary" if pagina == "Transferencias" else "secondary",
+    ):
+        st.session_state["pagina"] = "Transferencias"
+        st.rerun()
+with nav4:
+    st.button("Cerrar sesión", on_click=st.logout, use_container_width=True)
+st.caption(f"👤 {user_name}")
 
 # ── CEDEAR / GNR ─────────────────────────────────────────────────────────────
 if pagina == "CEDEAR / GNR":
