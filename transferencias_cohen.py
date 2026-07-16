@@ -17,6 +17,7 @@
 
 import json
 import time
+import tomllib
 import webbrowser
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,6 +27,12 @@ from pathlib import Path
 _DIR        = Path(__file__).parent
 COHEN_BASE  = "https://connect.cohen.com.ar"
 OUTPUT_HTML = _DIR / "transferencias_cohen.html"
+SECRETS_PATH = _DIR / ".streamlit" / "secrets.toml"
+
+
+def _secrets() -> dict:
+    with open(SECRETS_PATH, "rb") as f:
+        return tomllib.load(f)
 
 FECHA_DESDE = (date.today() - timedelta(days=30)).isoformat()
 FECHA_HASTA = date.today().isoformat()
@@ -38,9 +45,13 @@ _R = "\033[0m"; _B = "\033[1m"; _G = "\033[32m"; _C = "\033[36m"; _Y = "\033[33m
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
-def obtener_token() -> str:
+def obtener_token(user: str = None, pass_: str = None) -> str:
+    if user is None or pass_ is None:
+        s = _secrets()
+        user = user or s["API_USER"]
+        pass_ = pass_ or s["API_PASS"]
     resp = requests.get("http://72.60.155.149:8000/api/cohen/login-token",
-        headers={"x-user": "quantum", "x-pass": "QuantumCapital!+-"}, timeout=15)
+        headers={"x-user": user, "x-pass": pass_}, timeout=15)
     resp.raise_for_status()
     d = resp.json()
     if not d.get("success"):
@@ -307,9 +318,10 @@ table th:not(.sort-asc):not(.sort-desc):not(.ns)::after{content:" \2195";color:#
     <span class="navbar-brand fw-bold">Flujos Cohen</span>
     <div class="d-flex align-items-center gap-3">
       <button class="btn btn-warning btn-hoy fw-bold" onclick="verHoy()">&#128197; VER HOY</button>
-      <span class="text-white-50" style="font-size:.72rem">
+      <span class="text-white-50 d-flex align-items-center gap-2" style="font-size:.72rem">
         Datos __DESDE__ → __HASTA__ &nbsp;|&nbsp; __TS__
         &nbsp;|&nbsp; Refresco: <span id="countdown"></span>
+        &nbsp;|&nbsp; 👤 <span class="text-white-50">__USER_NAME__</span>
       </span>
     </div>
   </div>
@@ -866,7 +878,8 @@ def _js_safe(data) -> str:
     return json.dumps(data, ensure_ascii=False, default=str).replace("<", "\\u003c")
 
 
-def generar_html(tf: list, fci: list, ing: list, fd: str, fh: str, ts: str) -> str:
+def generar_html(tf: list, fci: list, ing: list, fd: str, fh: str, ts: str,
+                  user_name: str = "") -> str:
     return (HTML
             .replace("__TF_JSON__",    _js_safe(tf))
             .replace("__FCI_JSON__",   _js_safe(fci))
@@ -874,7 +887,8 @@ def generar_html(tf: list, fci: list, ing: list, fd: str, fh: str, ts: str) -> s
             .replace("__DESDE__",      fd)
             .replace("__HASTA__",      fh)
             .replace("__TS__",         ts)
-            .replace("__INTERVAL_S__", str(INTERVAL_S)))
+            .replace("__INTERVAL_S__", str(INTERVAL_S))
+            .replace("__USER_NAME__",  user_name))
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

@@ -12,6 +12,8 @@ import requests
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import transferencias_cohen as tc
+
 # ── Configuración ─────────────────────────────────────────────────────────────
 
 COHEN_BASE = "https://connect.cohen.com.ar"
@@ -26,10 +28,10 @@ EMAILS_AUTORIZADOS = [
 ]
 
 st.set_page_config(
-    page_title="Dashboard GNR – Cohen",
+    page_title="Dashboards Cohen – QTM Capital",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
     menu_items={},
 )
 
@@ -314,6 +316,49 @@ def cargar_datos():
     st.session_state["mep"] = mep
     st.session_state["ts"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     st.session_state["loaded_at"] = time.time()
+
+
+# ── Carga de datos — Transferencias ─────────────────────────────────────────────
+
+
+def cargar_datos_transferencias():
+    """Obtiene token, comitentes, transferencias/FCI/ingresos. Guarda en session_state."""
+    status_container = st.empty()
+    with status_container.status(
+        "⏳ Cargando transferencias desde Cohen...", expanded=True
+    ) as s:
+        st.write("🔐 Obteniendo token...")
+        token = tc.obtener_token(st.secrets["API_USER"], st.secrets["API_PASS"])
+
+        st.write("📋 Obteniendo comitentes...")
+        comitentes = tc.get_comitentes(token)
+        ids = [c["id"] for c in comitentes]
+        cmap = {c["id"]: tc.parsear_comitente(c) for c in comitentes}
+
+        st.write("💸 Descargando transferencias, FCI e ingresos...")
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futuros = {
+                ex.submit(tc.fetch_transferencias, comitentes, tc.FECHA_DESDE, tc.FECHA_HASTA, token): "tf",
+                ex.submit(tc.fetch_fci, ids, tc.FECHA_DESDE, tc.FECHA_HASTA, token): "fci",
+                ex.submit(tc.fetch_cta_cte, ids, tc.FECHA_DESDE, tc.FECHA_HASTA, token): "ing",
+            }
+            resultados = {}
+            for fut in as_completed(futuros):
+                key = futuros[fut]
+                try:
+                    resultados[key] = fut.result()
+                except Exception:
+                    resultados[key] = []
+
+        s.update(label="✅ Transferencias cargadas", state="complete", expanded=False)
+
+    status_container.empty()
+
+    st.session_state["tf_data"] = tc.normalizar_transferencias(resultados.get("tf", []), cmap)
+    st.session_state["tf_fci"] = tc.normalizar_fci(resultados.get("fci", []), cmap)
+    st.session_state["tf_ing"] = tc.normalizar_cte(resultados.get("ing", []), cmap)
+    st.session_state["tf_ts"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    st.session_state["tf_loaded_at"] = time.time()
 
 
 # ── HTML Template ─────────────────────────────────────────────────────────────
@@ -1154,7 +1199,6 @@ st.markdown(
     """
 <style>
     #MainMenu, header, footer {visibility: hidden;}
-    .stApp { overflow: hidden; }
     .block-container { padding: 0 !important; max-width: 100% !important; }
     iframe { border: none !important; }
 </style>
@@ -1162,30 +1206,62 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── Auto-refresh del lado Python ───────────────────────────────────────────────
-needs_refresh = False
-if "loaded_at" not in st.session_state:
-    needs_refresh = True
-elif time.time() - st.session_state["loaded_at"] > INTERVAL_S:
-    needs_refresh = True
-
-if needs_refresh:
-    try:
-        cargar_datos()
-    except Exception as e:
-        st.error(f"❌ Error al conectar con la API de Cohen: {e}")
-        st.stop()
-
-# ── Renderizar el HTML completo como componente ────────────────────────────────
-gnr = st.session_state.get("gnr", [])
-gr = st.session_state.get("gr", [])
-mep = st.session_state.get("mep", 0.0)
-ts = st.session_state.get("ts", "")
+# ── Menú lateral ─────────────────────────────────────────────────────────────
 user_name = st.user.name  # nombre del usuario autenticado
 
-html_content = generar_html(gnr, gr, mep, ts, user_name)
+st.sidebar.markdown("### 📊 Dashboards QTM")
+pagina = st.sidebar.radio(
+    "Dashboard", ["CEDEAR / GNR", "Transferencias"], label_visibility="collapsed"
+)
+st.sidebar.markdown("---")
+st.sidebar.caption(f"👤 {user_name}")
+st.sidebar.button("Cerrar sesión", on_click=st.logout, use_container_width=True)
 
-st.components.v1.html(html_content, height=900, scrolling=True)
+# ── CEDEAR / GNR ─────────────────────────────────────────────────────────────
+if pagina == "CEDEAR / GNR":
+    needs_refresh = False
+    if "loaded_at" not in st.session_state:
+        needs_refresh = True
+    elif time.time() - st.session_state["loaded_at"] > INTERVAL_S:
+        needs_refresh = True
+
+    if needs_refresh:
+        try:
+            cargar_datos()
+        except Exception as e:
+            st.error(f"❌ Error al conectar con la API de Cohen: {e}")
+            st.stop()
+
+    gnr = st.session_state.get("gnr", [])
+    gr = st.session_state.get("gr", [])
+    mep = st.session_state.get("mep", 0.0)
+    ts = st.session_state.get("ts", "")
+
+    html_content = generar_html(gnr, gr, mep, ts, user_name)
+    st.components.v1.html(html_content, height=900, scrolling=True)
+
+# ── Transferencias ───────────────────────────────────────────────────────────
+elif pagina == "Transferencias":
+    tf_needs_refresh = False
+    if "tf_loaded_at" not in st.session_state:
+        tf_needs_refresh = True
+    elif time.time() - st.session_state["tf_loaded_at"] > tc.INTERVAL_S:
+        tf_needs_refresh = True
+
+    if tf_needs_refresh:
+        try:
+            cargar_datos_transferencias()
+        except Exception as e:
+            st.error(f"❌ Error al conectar con la API de Cohen: {e}")
+            st.stop()
+
+    tf = st.session_state.get("tf_data", [])
+    fci = st.session_state.get("tf_fci", [])
+    ing = st.session_state.get("tf_ing", [])
+    tf_ts = st.session_state.get("tf_ts", "")
+
+    html_tf = tc.generar_html(tf, fci, ing, tc.FECHA_DESDE, tc.FECHA_HASTA, tf_ts, user_name)
+    st.components.v1.html(html_tf, height=900, scrolling=True)
 
 # ── Auto-rerun de Streamlit para refrescar datos ───────────────────────────────
 time.sleep(60)
