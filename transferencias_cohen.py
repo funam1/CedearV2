@@ -620,6 +620,7 @@ tbody tr:hover{background:var(--sur2)}
         <div class="acl" id="cli-list"></div>
       </div>
     </div>
+    <div class="bk" id="cli-rango"></div>
     <div class="kpis kpis5" id="cli-kpis"></div>
 
     <p class="sec-title">Transferencias</p>
@@ -682,6 +683,13 @@ var META_HASTA = "__HASTA__";
 var META_TS    = "__TS__";
 var REFRESH_S  = __INTERVAL_S__;
 
+// Filtro de fecha compartido entre las 4 vistas (Transferencias, FCI, Ingresos,
+// Por cliente). Se persiste en localStorage para sobrevivir a los refrescos.
+var FILTRO_DESDE = null;
+var FILTRO_HASTA = null;
+var CLIENTE_ACTUAL = null;
+var _syncingFecha = false;
+
 // ════════════════════════ HELPERS ════════════════════════
 function fmtM(v, d) {
   if (d === undefined) d = 2;
@@ -732,18 +740,35 @@ for (var ti = 0; ti < tabBtns.length; ti++) {
   });
 }
 
-// ════════════════════════ VER HOY ════════════════════════
-function verHoy() {
-  var hoy = todayStr();
-  document.getElementById("tf-desde").value = hoy;
-  document.getElementById("tf-hasta").value = hoy;
-  document.getElementById("fci-desde").value = hoy;
-  document.getElementById("fci-hasta").value = hoy;
-  document.getElementById("ing-desde").value = hoy;
-  document.getElementById("ing-hasta").value = hoy;
+// ════════════════════════ FILTRO DE FECHA COMPARTIDO ════════════════════════
+// Un solo rango desde/hasta para Transferencias, FCI, Ingresos y Por cliente.
+// Se persiste en localStorage: sobrevive a los refrescos automáticos (que
+// recargan todo el HTML) y por defecto arranca en el día de hoy.
+function _propagarFecha(d, h) {
+  if (_syncingFecha) return;
+  _syncingFecha = true;
+  FILTRO_DESDE = d; FILTRO_HASTA = h;
+  document.getElementById("tf-desde").value  = d; document.getElementById("tf-hasta").value  = h;
+  document.getElementById("fci-desde").value = d; document.getElementById("fci-hasta").value = h;
+  document.getElementById("ing-desde").value = d; document.getElementById("ing-hasta").value = h;
+  try { localStorage.setItem("qtm_flt_desde", d); localStorage.setItem("qtm_flt_hasta", h); } catch(e){}
   tfAplicar();
   fciAplicar();
   ingAplicar();
+  if (CLIENTE_ACTUAL) renderCliente(CLIENTE_ACTUAL);
+  _syncingFecha = false;
+}
+function restaurarFiltroFecha() {
+  var d = null, h = null;
+  try { d = localStorage.getItem("qtm_flt_desde"); h = localStorage.getItem("qtm_flt_hasta"); } catch(e){}
+  if (!d || !h) { d = h = todayStr(); }
+  _propagarFecha(d, h);
+}
+
+// ════════════════════════ VER HOY ════════════════════════
+function verHoy() {
+  var hoy = todayStr();
+  _propagarFecha(hoy, hoy);
 }
 document.getElementById("btnHoy").addEventListener("click", verHoy);
 
@@ -840,11 +865,6 @@ function makeAC(inpId, lstId, items, onSel) {
 var tfFilt = [];
 
 function tfInitFiltros() {
-  var fechas = [];
-  for (var i = 0; i < TF.length; i++) { if (TF[i].fecha_dia) fechas.push(TF[i].fecha_dia); }
-  fechas.sort();
-  document.getElementById("tf-desde").value = fechas.length ? fechas[0] : "";
-  document.getElementById("tf-hasta").value = fechas.length ? fechas[fechas.length-1] : "";
   var ms = {};
   for (var i = 0; i < TF.length; i++) { if (TF[i].moneda) ms[TF[i].moneda] = 1; }
   var sel = document.getElementById("tf-moneda");
@@ -872,13 +892,14 @@ function tfAplicar() {
     tfFilt.push(r);
   }
   tfRender();
+  if (!_syncingFecha) _propagarFecha(d, h);
 }
 function tfSoloPend() { document.getElementById("tf-estado").value = "pendiente"; tfAplicar(); }
 function tfReset() {
   document.getElementById("tf-estado").value = "";
   document.getElementById("tf-moneda").value = "";
   document.getElementById("tf-cli").value = "";
-  tfInitFiltros(); tfFilt = TF.slice(); tfRender();
+  tfInitFiltros(); tfAplicar();
 }
 
 function badgeTf(d) {
@@ -944,11 +965,6 @@ function mcardTf(d, idx) {
 var fciFilt = [];
 
 function fciInitFiltros() {
-  var fechas = [];
-  for (var i = 0; i < FCI.length; i++) { if (FCI[i].fecha_dia) fechas.push(FCI[i].fecha_dia); }
-  fechas.sort();
-  document.getElementById("fci-desde").value = fechas.length ? fechas[0] : "";
-  document.getElementById("fci-hasta").value = fechas.length ? fechas[fechas.length-1] : "";
   var ms = {};
   for (var i = 0; i < FCI.length; i++) { if (FCI[i].moneda) ms[FCI[i].moneda] = 1; }
   var sel = document.getElementById("fci-moneda");
@@ -978,6 +994,7 @@ function fciAplicar() {
     fciFilt.push(r);
   }
   fciRender();
+  if (!_syncingFecha) _propagarFecha(d, h);
 }
 function fciSoloResc() { document.getElementById("fci-tipo").value = "Rescate"; fciAplicar(); }
 function fciReset() {
@@ -985,7 +1002,7 @@ function fciReset() {
   document.getElementById("fci-moneda").value = "";
   document.getElementById("fci-fondo").value = "";
   document.getElementById("fci-cli").value = "";
-  fciInitFiltros(); fciFilt = FCI.slice(); fciRender();
+  fciInitFiltros(); fciAplicar();
 }
 
 function badgeFci(d) {
@@ -1044,11 +1061,6 @@ function fciRender() {
 var ingFilt = [];
 
 function ingInitFiltros() {
-  var fechas = [];
-  for (var i = 0; i < ING.length; i++) { if (ING[i].fecha_dia) fechas.push(ING[i].fecha_dia); }
-  fechas.sort();
-  document.getElementById("ing-desde").value = fechas.length ? fechas[0] : "";
-  document.getElementById("ing-hasta").value = fechas.length ? fechas[fechas.length-1] : "";
   var ms = {};
   for (var i = 0; i < ING.length; i++) { if (ING[i].moneda) ms[ING[i].moneda] = 1; }
   var selM = document.getElementById("ing-moneda");
@@ -1086,6 +1098,7 @@ function ingAplicar() {
     ingFilt.push(r);
   }
   ingRender();
+  if (!_syncingFecha) _propagarFecha(d, h);
 }
 function ingSoloIng() { document.getElementById("ing-cat").value = "ingreso"; ingAplicar(); }
 function ingReset() {
@@ -1093,10 +1106,7 @@ function ingReset() {
   document.getElementById("ing-moneda").value = "";
   document.getElementById("ing-tipo").value = "";
   document.getElementById("ing-cli").value = "";
-  ingInitFiltros();
-  ingFilt = [];
-  for (var i = 0; i < ING.length; i++) { if (ING[i].cat === "ingreso") ingFilt.push(ING[i]); }
-  ingRender();
+  ingInitFiltros(); ingAplicar();
 }
 
 function badgeIng(d) {
@@ -1169,10 +1179,14 @@ function buildClienteTab() {
 }
 
 function renderCliente(nro) {
+  CLIENTE_ACTUAL = nro;
+  var fd = FILTRO_DESDE, fh = FILTRO_HASTA;
+  var rangoEl = document.getElementById("cli-rango");
+  if (rangoEl) rangoEl.textContent = (fd && fh) ? ("Movimientos entre " + fd + " y " + fh) : "";
   var tfs = [], fcis = [], ings = [];
-  for (var i = 0; i < TF.length;  i++) { if (TF[i].nro_cuenta  === nro) tfs.push(TF[i]); }
-  for (var i = 0; i < FCI.length; i++) { if (FCI[i].nro_cuenta === nro) fcis.push(FCI[i]); }
-  for (var i = 0; i < ING.length; i++) { if (ING[i].nro_cuenta === nro) ings.push(ING[i]); }
+  for (var i = 0; i < TF.length;  i++) { var r=TF[i];  if (r.nro_cuenta ===nro && (!fd||r.fecha_dia>=fd) && (!fh||r.fecha_dia<=fh)) tfs.push(r); }
+  for (var i = 0; i < FCI.length; i++) { var r=FCI[i]; if (r.nro_cuenta ===nro && (!fd||r.fecha_dia>=fd) && (!fh||r.fecha_dia<=fh)) fcis.push(r); }
+  for (var i = 0; i < ING.length; i++) { var r=ING[i]; if (r.nro_cuenta ===nro && (!fd||r.fecha_dia>=fd) && (!fh||r.fecha_dia<=fh)) ings.push(r); }
   tfs.sort(function(a,b){ return b.fecha.localeCompare(a.fecha); });
   fcis.sort(function(a,b){ return b.fecha.localeCompare(a.fecha); });
   ings.sort(function(a,b){ return b.fecha.localeCompare(a.fecha); });
@@ -1181,9 +1195,9 @@ function renderCliente(nro) {
   for (var i = 0; i < fcis.length; i++) { if (fcis[i].solicitud_tipo && fcis[i].solicitud_tipo.indexOf("Rescate") !== -1) resc++; }
   for (var i = 0; i < ings.length; i++) { if (ings[i].cat === "ingreso") ingN++; }
   var nombre = "";
-  if (tfs.length) nombre = tfs[0].cliente;
-  else if (fcis.length) nombre = fcis[0].cliente;
-  else if (ings.length) nombre = ings[0].cliente;
+  for (var i = 0; i < TF.length && !nombre; i++)  { if (TF[i].nro_cuenta  === nro) nombre = TF[i].cliente; }
+  for (var i = 0; i < FCI.length && !nombre; i++) { if (FCI[i].nro_cuenta === nro) nombre = FCI[i].cliente; }
+  for (var i = 0; i < ING.length && !nombre; i++) { if (ING[i].nro_cuenta === nro) nombre = ING[i].cliente; }
 
   document.getElementById("cli-kpis").innerHTML =
     '<div class="kcard" style="grid-column:1/-1"><div class="lbl">Cliente</div><div style="font-size:1rem;font-weight:600">' + esc(nombre) + '</div></div>' +
@@ -1376,7 +1390,7 @@ document.getElementById("btnCopyDetail").addEventListener("click", function() {
 tfInitFiltros();
 fciInitFiltros();
 ingInitFiltros();
-verHoy();
+restaurarFiltroFecha();
 buildClienteTab();
 </script>
 
