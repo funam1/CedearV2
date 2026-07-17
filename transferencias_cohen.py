@@ -684,10 +684,15 @@ var META_TS    = "__TS__";
 var REFRESH_S  = __INTERVAL_S__;
 
 // Filtro de fecha compartido entre las 4 vistas (Transferencias, FCI, Ingresos,
-// Por cliente). Se persiste en localStorage para sobrevivir a los refrescos.
+// Por cliente), más el resto de los filtros de cada pestaña y el cliente
+// seleccionado. Streamlit reemplaza el srcdoc del iframe en cada refresco
+// (cada tc.INTERVAL_S) manteniendo el mismo elemento <iframe> — localStorage
+// puede no sobrevivir eso según el navegador (storage partitioning), pero
+// window.name sí, porque está atado al frame en sí, no al documento cargado
+// adentro. Por eso el estado se guarda ahí en vez de localStorage.
 var FILTRO_DESDE = null;
 var FILTRO_HASTA = null;
-var CLIENTE_ACTUAL = null;
+var CLIENTE_ACTUAL = "";
 var _syncingFecha = false;
 
 // ════════════════════════ HELPERS ════════════════════════
@@ -740,10 +745,39 @@ for (var ti = 0; ti < tabBtns.length; ti++) {
   });
 }
 
+// ════════════════════════ ESTADO (filtros + cliente) ════════════════════════
+// Todo lo que el usuario puede tocar en las 4 vistas se guarda en un solo
+// objeto, persistido en window.name (ver comentario más arriba de por qué
+// no localStorage).
+function guardarEstado() {
+  var st = {
+    desde: FILTRO_DESDE, hasta: FILTRO_HASTA,
+    tfEstado: document.getElementById("tf-estado").value,
+    tfMoneda: document.getElementById("tf-moneda").value,
+    tfCli:    document.getElementById("tf-cli").value,
+    fciTipo:  document.getElementById("fci-tipo").value,
+    fciMoneda:document.getElementById("fci-moneda").value,
+    fciFondo: document.getElementById("fci-fondo").value,
+    fciCli:   document.getElementById("fci-cli").value,
+    ingCat:   document.getElementById("ing-cat").value,
+    ingMoneda:document.getElementById("ing-moneda").value,
+    ingTipo:  document.getElementById("ing-tipo").value,
+    ingCli:   document.getElementById("ing-cli").value,
+    cliente:  CLIENTE_ACTUAL
+  };
+  try { window.name = "qtm_flt:" + JSON.stringify(st); } catch(e){}
+}
+function cargarEstado() {
+  try {
+    if (window.name && window.name.indexOf("qtm_flt:") === 0) {
+      return JSON.parse(window.name.slice(8));
+    }
+  } catch(e){}
+  return null;
+}
+
 // ════════════════════════ FILTRO DE FECHA COMPARTIDO ════════════════════════
 // Un solo rango desde/hasta para Transferencias, FCI, Ingresos y Por cliente.
-// Se persiste en localStorage: sobrevive a los refrescos automáticos (que
-// recargan todo el HTML) y por defecto arranca en el día de hoy.
 function _propagarFecha(d, h) {
   if (_syncingFecha) return;
   _syncingFecha = true;
@@ -751,17 +785,31 @@ function _propagarFecha(d, h) {
   document.getElementById("tf-desde").value  = d; document.getElementById("tf-hasta").value  = h;
   document.getElementById("fci-desde").value = d; document.getElementById("fci-hasta").value = h;
   document.getElementById("ing-desde").value = d; document.getElementById("ing-hasta").value = h;
-  try { localStorage.setItem("qtm_flt_desde", d); localStorage.setItem("qtm_flt_hasta", h); } catch(e){}
   tfAplicar();
   fciAplicar();
   ingAplicar();
-  if (CLIENTE_ACTUAL) renderCliente(CLIENTE_ACTUAL);
+  renderCliente(CLIENTE_ACTUAL);
+  guardarEstado();
   _syncingFecha = false;
 }
 function restaurarFiltroFecha() {
-  var d = null, h = null;
-  try { d = localStorage.getItem("qtm_flt_desde"); h = localStorage.getItem("qtm_flt_hasta"); } catch(e){}
-  if (!d || !h) { d = h = todayStr(); }
+  var st = cargarEstado();
+  if (st) {
+    document.getElementById("tf-estado").value  = st.tfEstado  || "";
+    document.getElementById("tf-moneda").value  = st.tfMoneda  || "";
+    document.getElementById("tf-cli").value     = st.tfCli     || "";
+    document.getElementById("fci-tipo").value   = st.fciTipo   || "";
+    document.getElementById("fci-moneda").value = st.fciMoneda || "";
+    document.getElementById("fci-fondo").value  = st.fciFondo  || "";
+    document.getElementById("fci-cli").value    = st.fciCli    || "";
+    document.getElementById("ing-cat").value    = st.ingCat    || "ingreso";
+    document.getElementById("ing-moneda").value = st.ingMoneda || "";
+    document.getElementById("ing-tipo").value   = st.ingTipo   || "";
+    document.getElementById("ing-cli").value    = st.ingCli    || "";
+    CLIENTE_ACTUAL = st.cliente || "";
+  }
+  var d = (st && st.desde) || todayStr();
+  var h = (st && st.hasta) || todayStr();
   _propagarFecha(d, h);
 }
 
@@ -1174,28 +1222,31 @@ function buildClienteTab() {
   for (var i = 0; i < TF.length; i++)  { if (!map[TF[i].nro_cuenta])  map[TF[i].nro_cuenta] = TF[i]; }
   for (var i = 0; i < FCI.length; i++) { if (!map[FCI[i].nro_cuenta]) map[FCI[i].nro_cuenta] = FCI[i]; }
   for (var i = 0; i < ING.length; i++) { if (!map[ING[i].nro_cuenta]) map[ING[i].nro_cuenta] = ING[i]; }
-  var items = [];
+  var items = [{value: "", label: "— Todos los clientes —"}];
   var keys = Object.keys(map).sort(function(a,b){ return a.localeCompare(b); });
   for (var i = 0; i < keys.length; i++) {
     var d = map[keys[i]];
     items.push({value: d.nro_cuenta, label: d.nro_cuenta + " — " + d.cliente});
   }
   makeAC("cli-input", "cli-list", items, function(val) { renderCliente(val); });
-  if (items.length) {
-    document.getElementById("cli-input").value = items[0].label;
-    renderCliente(items[0].value);
-  }
+  // Sin selección (o con lo que haya quedado guardado del estado anterior):
+  // por defecto arranca vacío mostrando todos, no un cliente al azar.
+  var actual = null;
+  for (var i = 0; i < items.length; i++) { if (items[i].value === CLIENTE_ACTUAL) { actual = items[i]; break; } }
+  document.getElementById("cli-input").value = actual ? actual.label : "";
+  renderCliente(CLIENTE_ACTUAL);
 }
 
 function renderCliente(nro) {
-  CLIENTE_ACTUAL = nro;
+  CLIENTE_ACTUAL = nro || "";
+  var todos = !CLIENTE_ACTUAL;
   var fd = FILTRO_DESDE, fh = FILTRO_HASTA;
   var rangoEl = document.getElementById("cli-rango");
   if (rangoEl) rangoEl.textContent = (fd && fh) ? ("Movimientos entre " + fd + " y " + fh) : "";
   var tfs = [], fcis = [], ings = [];
-  for (var i = 0; i < TF.length;  i++) { var r=TF[i];  if (r.nro_cuenta ===nro && (!fd||r.fecha_dia>=fd) && (!fh||r.fecha_dia<=fh)) tfs.push(r); }
-  for (var i = 0; i < FCI.length; i++) { var r=FCI[i]; if (r.nro_cuenta ===nro && (!fd||r.fecha_dia>=fd) && (!fh||r.fecha_dia<=fh)) fcis.push(r); }
-  for (var i = 0; i < ING.length; i++) { var r=ING[i]; if (r.nro_cuenta ===nro && (!fd||r.fecha_dia>=fd) && (!fh||r.fecha_dia<=fh)) ings.push(r); }
+  for (var i = 0; i < TF.length;  i++) { var r=TF[i];  if ((todos||r.nro_cuenta===CLIENTE_ACTUAL) && (!fd||r.fecha_dia>=fd) && (!fh||r.fecha_dia<=fh)) tfs.push(r); }
+  for (var i = 0; i < FCI.length; i++) { var r=FCI[i]; if ((todos||r.nro_cuenta===CLIENTE_ACTUAL) && (!fd||r.fecha_dia>=fd) && (!fh||r.fecha_dia<=fh)) fcis.push(r); }
+  for (var i = 0; i < ING.length; i++) { var r=ING[i]; if ((todos||r.nro_cuenta===CLIENTE_ACTUAL) && (!fd||r.fecha_dia>=fd) && (!fh||r.fecha_dia<=fh)) ings.push(r); }
   tfs.sort(function(a,b){ return b.fecha.localeCompare(a.fecha); });
   fcis.sort(function(a,b){ return b.fecha.localeCompare(a.fecha); });
   ings.sort(function(a,b){ return b.fecha.localeCompare(a.fecha); });
@@ -1203,10 +1254,13 @@ function renderCliente(nro) {
   for (var i = 0; i < tfs.length;  i++) { if (tfs[i].estado_cat === "pendiente") pend++; }
   for (var i = 0; i < fcis.length; i++) { if (fcis[i].solicitud_tipo && fcis[i].solicitud_tipo.indexOf("Rescate") !== -1) resc++; }
   for (var i = 0; i < ings.length; i++) { if (ings[i].cat === "ingreso") ingN++; }
-  var nombre = "";
-  for (var i = 0; i < TF.length && !nombre; i++)  { if (TF[i].nro_cuenta  === nro) nombre = TF[i].cliente; }
-  for (var i = 0; i < FCI.length && !nombre; i++) { if (FCI[i].nro_cuenta === nro) nombre = FCI[i].cliente; }
-  for (var i = 0; i < ING.length && !nombre; i++) { if (ING[i].nro_cuenta === nro) nombre = ING[i].cliente; }
+  var nombre = "Todos los clientes";
+  if (!todos) {
+    nombre = "";
+    for (var i = 0; i < TF.length && !nombre; i++)  { if (TF[i].nro_cuenta  === CLIENTE_ACTUAL) nombre = TF[i].cliente; }
+    for (var i = 0; i < FCI.length && !nombre; i++) { if (FCI[i].nro_cuenta === CLIENTE_ACTUAL) nombre = FCI[i].cliente; }
+    for (var i = 0; i < ING.length && !nombre; i++) { if (ING[i].nro_cuenta === CLIENTE_ACTUAL) nombre = ING[i].cliente; }
+  }
 
   document.getElementById("cli-kpis").innerHTML =
     '<div class="kcard" style="grid-column:1/-1"><div class="lbl">Cliente</div><div style="font-size:1rem;font-weight:600">' + esc(nombre) + '</div></div>' +
@@ -1220,7 +1274,8 @@ function renderCliente(nro) {
   var rt = "";
   for (var i = 0; i < tfs.length; i++) {
     var d = tfs[i];
-    rt += '<tr><td>' + esc(d.fecha) + '</td><td>' + esc(d.tipo) + '</td><td>' + esc(d.moneda) + '</td>' +
+    var tipoTf = todos ? (esc(d.nro_cuenta) + ' ' + esc(d.cliente) + ' · ' + esc(d.tipo)) : esc(d.tipo);
+    rt += '<tr><td>' + esc(d.fecha) + '</td><td>' + tipoTf + '</td><td>' + esc(d.moneda) + '</td>' +
       '<td class="num">' + fmtM(d.importe) + '</td>' +
       '<td>' + esc(d.banco) + ' ' + esc(d.cuenta) + '</td><td>' + esc(d.cbu) + '</td>' +
       '<td>' + badgeTf(d) + '</td></tr>';
@@ -1234,8 +1289,9 @@ function renderCliente(nro) {
   var rf = "";
   for (var i = 0; i < fcis.length; i++) {
     var d = fcis[i];
+    var fondoLbl = todos ? (esc(d.nro_cuenta) + ' ' + esc(d.cliente) + ' · ' + esc(d.fondo)) : esc(d.fondo);
     rf += '<tr><td>' + esc(d.fecha) + '</td><td>' + badgeFci(d) + '</td>' +
-      '<td class="ell" title="' + esc(d.fondo) + '">' + esc(d.fondo) + '</td>' +
+      '<td class="ell" title="' + esc(d.fondo) + '">' + fondoLbl + '</td>' +
       '<td>' + esc(d.moneda) + '</td><td class="num">' + fmtM(d.importe) + '</td>' +
       '<td class="num">' + fmtM(d.cuotapartes, 3) + '</td></tr>';
   }
@@ -1245,7 +1301,7 @@ function renderCliente(nro) {
     var d = fcis[i];
     var cat2 = (d.solicitud_tipo && d.solicitud_tipo.indexOf("Rescate") !== -1) ? "rescate" : "suscripcion";
     mcf += '<div class="mcard"><span class="dot dot-' + cat2 + '"></span>' +
-      '<div class="mbody"><div class="mr1"><span class="mcli">' + esc(d.fondo) + '</span>' +
+      '<div class="mbody"><div class="mr1"><span class="mcli">' + (todos ? esc(d.cliente) : esc(d.fondo)) + '</span>' +
       '<span class="mimp">' + esc(d.moneda) + ' ' + fmtM(d.importe) + '</span></div>' +
       '<div class="mr2"><span class="msub">' + esc(d.fecha) + '</span></div>' +
       '<div class="mbadge">' + badgeFci(d) + '</div></div></div>';
@@ -1256,7 +1312,8 @@ function renderCliente(nro) {
   var ri = "";
   for (var i = 0; i < ings.length; i++) {
     var d = ings[i];
-    ri += '<tr><td>' + esc(d.fecha) + '</td><td class="ell">' + esc(d.tipo) + '</td>' +
+    var tipoIng = todos ? (esc(d.nro_cuenta) + ' ' + esc(d.cliente) + ' · ' + esc(d.tipo)) : esc(d.tipo);
+    ri += '<tr><td>' + esc(d.fecha) + '</td><td class="ell">' + tipoIng + '</td>' +
       '<td>' + esc(d.moneda) + '</td><td class="num">' + fmtM(d.importe) + '</td>' +
       '<td>' + badgeIng(d) + '</td></tr>';
   }
@@ -1265,12 +1322,13 @@ function renderCliente(nro) {
   for (var i = 0; i < ings.length; i++) {
     var d = ings[i];
     mci += '<div class="mcard"><span class="dot dot-' + d.cat + '"></span>' +
-      '<div class="mbody"><div class="mr1"><span class="mcli">' + esc(d.tipo) + '</span>' +
+      '<div class="mbody"><div class="mr1"><span class="mcli">' + (todos ? esc(d.cliente) : esc(d.tipo)) + '</span>' +
       '<span class="mimp">' + esc(d.moneda) + ' ' + fmtM(d.importe) + '</span></div>' +
       '<div class="mr2"><span class="msub">' + esc(d.fecha) + '</span></div>' +
       '<div class="mbadge">' + badgeIng(d) + '</div></div></div>';
   }
   document.getElementById("mob-cli-ing").innerHTML = mci || '<div class="empty">Sin comprobantes.</div>';
+  guardarEstado();
 }
 
 // ════════════════════════ KPI HELPER ════════════════════════
