@@ -1207,6 +1207,7 @@ def check_auth() -> bool:
 
     st.markdown(
         """
+    <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&display=swap" rel="stylesheet">
     <style>
         #MainMenu, header, footer {visibility: hidden;}
         .login-wrap {
@@ -1219,14 +1220,18 @@ def check_auth() -> bool:
             padding: 2.5rem 2rem; min-width: 320px; text-align: center;
         }
         .login-logo {
-            font-size: 2rem; font-weight: 800; letter-spacing: -.02em;
-            background: linear-gradient(135deg,#1a1a2e,#16213e);
+            font-family: 'DM Serif Display', Georgia, serif;
+            font-size: 2rem; font-weight: 400; letter-spacing: -.01em;
+            background: linear-gradient(135deg,#0b1830,#0F2044 55%,#16243a);
             -webkit-background-clip: text; -webkit-text-fill-color: transparent;
             margin-bottom: .25rem;
         }
-        .login-sub { font-size: .82rem; color: #6c757d; margin-bottom: 1.5rem; }
+        .login-sub {
+            font-size: .68rem; color: #C9A84C; text-transform: uppercase;
+            letter-spacing: .14em; font-weight: 600; margin-bottom: 1.5rem;
+        }
         .stButton > button {
-            background: linear-gradient(135deg,#1a1a2e,#16213e);
+            background: linear-gradient(135deg,#0b1830,#0F2044 55%,#16243a);
             color: white; border: none; border-radius: 8px;
             padding: .6rem 1.2rem; font-size: .9rem; cursor: pointer;
             width: 100%;
@@ -1243,8 +1248,8 @@ def check_auth() -> bool:
             """
         <div class="login-wrap">
           <div class="login-box">
-            <div class="login-logo">📊 GNR Cohen</div>
-            <div class="login-sub">Dashboard de Ganancia No Realizada &amp; Realizada</div>
+            <div class="login-logo">📊 QTM Capital</div>
+            <div class="login-sub">Dashboards</div>
           </div>
         </div>
         """,
@@ -1259,8 +1264,8 @@ def check_auth() -> bool:
             """
         <div class="login-wrap">
           <div class="login-box">
-            <div class="login-logo">📊 GNR Cohen</div>
-            <div class="login-sub">Dashboard de Ganancia No Realizada &amp; Realizada</div>
+            <div class="login-logo">📊 QTM Capital</div>
+            <div class="login-sub">Dashboards</div>
           </div>
         </div>
         """,
