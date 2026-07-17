@@ -747,8 +747,20 @@ for (var ti = 0; ti < tabBtns.length; ti++) {
 
 // ════════════════════════ ESTADO (filtros + cliente) ════════════════════════
 // Todo lo que el usuario puede tocar en las 4 vistas se guarda en un solo
-// objeto, persistido en window.name (ver comentario más arriba de por qué
-// no localStorage).
+// objeto. Streamlit reemplaza (o directamente recrea) el <iframe> en cada
+// refresco, así que ni localStorage ni window.name DE ESTE FRAME sobreviven
+// de forma confiable. La pestaña del navegador con la app de Streamlit sí
+// persiste (Streamlit actualiza todo por websocket, nunca navega la página),
+// así que el estado se guarda en el localStorage de la página PADRE
+// (window.parent), no en el del iframe. Se guarda también en el propio
+// window.name como respaldo extra, por si algún navegador bloqueara el
+// acceso a window.parent.localStorage.
+function _storages() {
+  var out = [];
+  try { if (window.parent && window.parent !== window && window.parent.localStorage) out.push(window.parent.localStorage); } catch(e){}
+  try { if (window.localStorage) out.push(window.localStorage); } catch(e){}
+  return out;
+}
 function guardarEstado() {
   var st = {
     desde: FILTRO_DESDE, hasta: FILTRO_HASTA,
@@ -765,9 +777,21 @@ function guardarEstado() {
     ingCli:   document.getElementById("ing-cli").value,
     cliente:  CLIENTE_ACTUAL
   };
-  try { window.name = "qtm_flt:" + JSON.stringify(st); } catch(e){}
+  var json = JSON.stringify(st);
+  var stores = _storages();
+  for (var i = 0; i < stores.length; i++) {
+    try { stores[i].setItem("qtm_tf_estado", json); } catch(e){}
+  }
+  try { window.name = "qtm_flt:" + json; } catch(e){}
 }
 function cargarEstado() {
+  var stores = _storages();
+  for (var i = 0; i < stores.length; i++) {
+    try {
+      var raw = stores[i].getItem("qtm_tf_estado");
+      if (raw) return JSON.parse(raw);
+    } catch(e){}
+  }
   try {
     if (window.name && window.name.indexOf("qtm_flt:") === 0) {
       return JSON.parse(window.name.slice(8));
