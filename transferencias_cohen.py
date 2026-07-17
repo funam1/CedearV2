@@ -824,7 +824,7 @@ function makeAC(inpId, lstId, items, onSel) {
   var inp = document.getElementById(inpId);
   var lst = document.getElementById(lstId);
   var idx = -1;
-  inp.addEventListener("input", function() {
+  function buscar() {
     var q = inp.value.toLowerCase();
     var ms = [];
     for (var i = 0; i < items.length; i++) {
@@ -838,6 +838,15 @@ function makeAC(inpId, lstId, items, onSel) {
     lst.innerHTML = h;
     lst.style.display = ms.length ? "block" : "none";
     idx = -1;
+  }
+  inp.addEventListener("input", buscar);
+  // El input arranca precargado con el cliente por defecto; al enfocarlo se
+  // selecciona todo el texto para que escribir lo reemplace directamente
+  // (si no, el texto tipeado se pega al final y la búsqueda no matchea nada),
+  // y se muestra de una el listado para que quede claro cómo se usa.
+  inp.addEventListener("focus", function() {
+    inp.select();
+    buscar();
   });
   inp.addEventListener("keydown", function(e) {
     var els = lst.querySelectorAll(".aci");
