@@ -285,8 +285,17 @@ def fetch_gr(token: str, mep: float, progress_bar=None) -> list:
 # ── Carga de datos con caché ───────────────────────────────────────────────────
 
 
+@st.cache_data(ttl=INTERVAL_S, show_spinner=False)
 def cargar_datos():
-    """Obtiene token, MEP, GNR y GR. Guarda en session_state."""
+    """Obtiene token, MEP, GNR y GR.
+
+    Cacheado a nivel de proceso (no de sesión): el primer usuario que entra
+    después de que venza el TTL dispara el fetch real; todos los que entran
+    mientras tanto reciben el mismo resultado cacheado sin volver a pegarle
+    a la API de Cohen. show_spinner=False porque el feedback de progreso
+    (status/progress bars) sólo tiene sentido durante el fetch real, nunca
+    en un cache-hit.
+    """
     status_container = st.empty()
     with status_container.status(
         "⏳ Cargando datos desde Cohen...", expanded=True
@@ -311,42 +320,27 @@ def cargar_datos():
 
     status_container.empty()
 
-    st.session_state["gnr"] = gnr
-    st.session_state["gr"] = gr
-    st.session_state["mep"] = mep
-    st.session_state["ts"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    st.session_state["loaded_at"] = time.time()
+    ts = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    return gnr, gr, mep, ts
 
 
 # ── Carga de datos — Transferencias ─────────────────────────────────────────────
+# Igual que GNR: cacheado a nivel de proceso, compartido entre todos los
+# usuarios. Se separa en dos cachés con TTL distinto para no repetir el
+# fetch de los 7 días completos en cada refresco:
+#   - _cargar_tf_base: los primeros (RANGO_DIAS-1) días, sin contar hoy.
+#     Cacheado por día (la fecha de hoy es parte de la cache key), así que
+#     Streamlit lo recalcula una única vez por día y lo comparte el resto
+#     de la jornada.
+#   - _cargar_tf_hoy: sólo el día de hoy, con TTL = tc.INTERVAL_S — se
+#     recalcula cada N minutos y ese resultado también se comparte entre
+#     todos los usuarios hasta el próximo vencimiento.
+# cargar_datos_transferencias() sólo concatena ambos resultados.
 
 
-def _reemplazar_dia(viejas: list, nuevas: list, dia_iso: str) -> list:
-    """Pisa sólo las filas de `dia_iso` con `nuevas`; conserva el resto tal cual
-    estaba en caché (evita tener que volver a bajar toda la ventana de 7 días
-    en cada refresco automático)."""
-    resto = [r for r in viejas if r.get("fecha_dia") != dia_iso]
-    return resto + nuevas
-
-
-def cargar_datos_transferencias(full: bool = True):
-    """Obtiene token, comitentes, transferencias/FCI/ingresos. Guarda en session_state.
-
-    full=True  → recarga toda la ventana de tc.RANGO_DIAS días (primera carga
-                 del día, o del proceso).
-    full=False → sólo vuelve a pedir el día de hoy y pisa esas filas en la
-                 caché existente; los demás días de la ventana quedan como
-                 estaban, sin volver a bajarlos (así el refresco automático
-                 cada tc.INTERVAL_S no repite todo el fetch de 7 días).
-    """
-    hoy = date.today()
-    hoy_iso = hoy.isoformat()
-    rango_desde = (hoy - timedelta(days=tc.RANGO_DIAS - 1)).isoformat() if full else hoy_iso
-
+def _fetch_transferencias_rango(desde: str, hasta: str, status_msg: str):
     status_container = st.empty()
-    with status_container.status(
-        "⏳ Cargando transferencias desde Cohen...", expanded=True
-    ) as s:
+    with status_container.status(status_msg, expanded=True) as s:
         st.write("🔐 Obteniendo token...")
         token = tc.obtener_token(st.secrets["API_USER"], st.secrets["API_PASS"])
 
@@ -356,12 +350,12 @@ def cargar_datos_transferencias(full: bool = True):
         cmap = {c["id"]: tc.parsear_comitente(c) for c in comitentes}
         id_usuario = tc.get_id_usuario(token)
 
-        st.write("💸 Descargando transferencias, FCI e ingresos..." if full else "💸 Actualizando movimientos de hoy...")
+        st.write("💸 Descargando transferencias, FCI e ingresos...")
         with ThreadPoolExecutor(max_workers=3) as ex:
             futuros = {
-                ex.submit(tc.fetch_transferencias, comitentes, rango_desde, hoy_iso, token): "tf",
-                ex.submit(tc.fetch_fci, comitentes, rango_desde, hoy_iso, token, id_usuario): "fci",
-                ex.submit(tc.fetch_cta_cte, ids, rango_desde, hoy_iso, token): "ing",
+                ex.submit(tc.fetch_transferencias, comitentes, desde, hasta, token): "tf",
+                ex.submit(tc.fetch_fci, comitentes, desde, hasta, token, id_usuario): "fci",
+                ex.submit(tc.fetch_cta_cte, ids, desde, hasta, token): "ing",
             }
             resultados = {}
             for fut in as_completed(futuros):
@@ -371,27 +365,42 @@ def cargar_datos_transferencias(full: bool = True):
                 except Exception:
                     resultados[key] = []
 
-        s.update(label="✅ Transferencias cargadas", state="complete", expanded=False)
-
+        s.update(label="✅ Cargado", state="complete", expanded=False)
     status_container.empty()
 
-    tf_nuevo  = tc.normalizar_transferencias(resultados.get("tf", []), cmap)
-    fci_nuevo = tc.normalizar_fci(resultados.get("fci", []))
-    ing_nuevo = tc.normalizar_cte(resultados.get("ing", []), cmap)
+    tf  = tc.normalizar_transferencias(resultados.get("tf", []), cmap)
+    fci = tc.normalizar_fci(resultados.get("fci", []))
+    ing = tc.normalizar_cte(resultados.get("ing", []), cmap)
+    return tf, fci, ing
 
-    if full:
-        st.session_state["tf_data"] = tf_nuevo
-        st.session_state["tf_fci"] = fci_nuevo
-        st.session_state["tf_ing"] = ing_nuevo
-        st.session_state["tf_range_desde"] = rango_desde
-    else:
-        st.session_state["tf_data"] = _reemplazar_dia(st.session_state.get("tf_data", []), tf_nuevo, hoy_iso)
-        st.session_state["tf_fci"] = _reemplazar_dia(st.session_state.get("tf_fci", []), fci_nuevo, hoy_iso)
-        st.session_state["tf_ing"] = _reemplazar_dia(st.session_state.get("tf_ing", []), ing_nuevo, hoy_iso)
 
-    st.session_state["tf_range_dia"] = hoy_iso  # día de la última carga (detecta el cambio de día)
-    st.session_state["tf_ts"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    st.session_state["tf_loaded_at"] = time.time()
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def _cargar_tf_base(dia_cache_key: str):
+    hoy = date.fromisoformat(dia_cache_key)
+    desde = (hoy - timedelta(days=tc.RANGO_DIAS - 1)).isoformat()
+    ayer = (hoy - timedelta(days=1)).isoformat()
+    return _fetch_transferencias_rango(desde, ayer, "⏳ Cargando historial de transferencias...")
+
+
+@st.cache_data(ttl=tc.INTERVAL_S, show_spinner=False)
+def _cargar_tf_hoy():
+    hoy_iso = date.today().isoformat()
+    tf, fci, ing = _fetch_transferencias_rango(hoy_iso, hoy_iso, "💸 Actualizando movimientos de hoy...")
+    ts = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    return tf, fci, ing, ts
+
+
+def cargar_datos_transferencias():
+    hoy = date.today()
+    rango_desde = (hoy - timedelta(days=tc.RANGO_DIAS - 1)).isoformat()
+
+    tf_base, fci_base, ing_base = _cargar_tf_base(hoy.isoformat())
+    tf_hoy, fci_hoy, ing_hoy, ts = _cargar_tf_hoy()
+
+    tf = tf_base + tf_hoy
+    fci = fci_base + fci_hoy
+    ing = ing_base + ing_hoy
+    return tf, fci, ing, ts, rango_desde
 
 
 # ── HTML Template ─────────────────────────────────────────────────────────────
@@ -1377,55 +1386,24 @@ st.caption(f"👤 {user_name}")
 
 # ── CEDEAR / GNR ─────────────────────────────────────────────────────────────
 if pagina == "CEDEAR / GNR":
-    needs_refresh = False
-    if "loaded_at" not in st.session_state:
-        needs_refresh = True
-    elif time.time() - st.session_state["loaded_at"] > INTERVAL_S:
-        needs_refresh = True
-
-    if needs_refresh:
-        try:
-            cargar_datos()
-        except Exception as e:
-            st.error(f"❌ Error al conectar con la API de Cohen: {e}")
-            st.stop()
-
-    gnr = st.session_state.get("gnr", [])
-    gr = st.session_state.get("gr", [])
-    mep = st.session_state.get("mep", 0.0)
-    ts = st.session_state.get("ts", "")
+    try:
+        gnr, gr, mep, ts = cargar_datos()
+    except Exception as e:
+        st.error(f"❌ Error al conectar con la API de Cohen: {e}")
+        st.stop()
 
     html_content = generar_html(gnr, gr, mep, ts, user_name)
     st.components.v1.html(html_content, height=900, scrolling=True)
 
 # ── Transferencias ───────────────────────────────────────────────────────────
 elif pagina == "Transferencias":
+    try:
+        tf, fci, ing, tf_ts, tf_range_desde = cargar_datos_transferencias()
+    except Exception as e:
+        st.error(f"❌ Error al conectar con la API de Cohen: {e}")
+        st.stop()
+
     hoy_iso = date.today().isoformat()
-    # Carga completa (7 días): primera vez, o si cambió el día desde la
-    # última carga (la ventana entera se corre un día, hay que rebajarla).
-    # Si no, sólo se vuelve a pedir el día de hoy (ver cargar_datos_transferencias).
-    tf_needs_full = (
-        "tf_loaded_at" not in st.session_state
-        or st.session_state.get("tf_range_dia") != hoy_iso
-    )
-    tf_needs_refresh_hoy = (
-        not tf_needs_full
-        and time.time() - st.session_state["tf_loaded_at"] > tc.INTERVAL_S
-    )
-
-    if tf_needs_full or tf_needs_refresh_hoy:
-        try:
-            cargar_datos_transferencias(full=tf_needs_full)
-        except Exception as e:
-            st.error(f"❌ Error al conectar con la API de Cohen: {e}")
-            st.stop()
-
-    tf = st.session_state.get("tf_data", [])
-    fci = st.session_state.get("tf_fci", [])
-    ing = st.session_state.get("tf_ing", [])
-    tf_ts = st.session_state.get("tf_ts", "")
-    tf_range_desde = st.session_state.get("tf_range_desde", hoy_iso)
-
     html_tf = tc.generar_html(tf, fci, ing, tf_range_desde, hoy_iso, tf_ts, user_name)
     st.components.v1.html(html_tf, height=900, scrolling=True)
 
