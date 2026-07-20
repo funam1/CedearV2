@@ -334,12 +334,13 @@ def cargar_datos_transferencias():
         comitentes = tc.get_comitentes(token)
         ids = [c["id"] for c in comitentes]
         cmap = {c["id"]: tc.parsear_comitente(c) for c in comitentes}
+        id_usuario = tc.get_id_usuario(token)
 
         st.write("💸 Descargando transferencias, FCI e ingresos...")
         with ThreadPoolExecutor(max_workers=3) as ex:
             futuros = {
                 ex.submit(tc.fetch_transferencias, comitentes, tc.FECHA_DESDE, tc.FECHA_HASTA, token): "tf",
-                ex.submit(tc.fetch_fci, ids, tc.FECHA_DESDE, tc.FECHA_HASTA, token): "fci",
+                ex.submit(tc.fetch_fci, comitentes, tc.FECHA_DESDE, tc.FECHA_HASTA, token, id_usuario): "fci",
                 ex.submit(tc.fetch_cta_cte, ids, tc.FECHA_DESDE, tc.FECHA_HASTA, token): "ing",
             }
             resultados = {}
@@ -355,7 +356,7 @@ def cargar_datos_transferencias():
     status_container.empty()
 
     st.session_state["tf_data"] = tc.normalizar_transferencias(resultados.get("tf", []), cmap)
-    st.session_state["tf_fci"] = tc.normalizar_fci(resultados.get("fci", []), cmap)
+    st.session_state["tf_fci"] = tc.normalizar_fci(resultados.get("fci", []))
     st.session_state["tf_ing"] = tc.normalizar_cte(resultados.get("ing", []), cmap)
     st.session_state["tf_ts"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     st.session_state["tf_loaded_at"] = time.time()

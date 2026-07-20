@@ -16,8 +16,10 @@
 # Refresca automáticamente cada INTERVAL_S segundos.
 
 import json
+import re
 import time
 import tomllib
+import unicodedata
 import webbrowser
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -66,6 +68,16 @@ def get_comitentes(token: str) -> list:
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=15)
     resp.raise_for_status()
     return resp.json() if isinstance(resp.json(), list) else []
+
+
+def get_id_usuario(token: str) -> int:
+    """idUsuarioLogueado que exige /api/posicion/ListarMovimientos (no es el idComitente)."""
+    resp = requests.get(f"{COHEN_BASE}/api/Authorize/UserInfo",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=15)
+    resp.raise_for_status()
+    claims = resp.json().get("exposedClaims", {})
+    nameid = claims.get("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier")
+    return int(nameid[0]) if nameid else 0
 
 
 def parsear_comitente(c: dict) -> tuple:
@@ -181,38 +193,77 @@ def normalizar_transferencias(items: list, cmap: dict) -> list:
 
 
 # ── FCI — Suscripciones / Rescates ───────────────────────────────────────────
+# comprobanteSuscripcionRescate/list sólo lista comprobantes ya cerrados por
+# back-office, que para un pedido de hoy recién aparecen el día hábil
+# siguiente. ListarMovimientos es el libro de movimientos por comitente que
+# ya usa el propio Cohen para el detalle de cuenta — ahí las Suscripciones y
+# Rescates figuran el mismo día en que se piden. A cambio hay que pedirlo
+# comitente por comitente (no acepta una lista) y filtrar del resto de
+# movimientos (compras, cauciones, mantenimiento, etc.) los que son de FCI.
 
-def fetch_fci(ids_comitentes: list, fd: str, fh: str, token: str) -> list:
-    return _paginar(
-        f"{COHEN_BASE}/api/comprobanteSuscripcionRescate/list",
-        {"order": [{"property": "comprobanteFecha", "descending": True}],
-         "fechaDesde": f"{fd}T00:00:00.000Z",
-         "fechaHasta": f"{fh}T23:59:59.999Z",
-         "idsComitentes": ids_comitentes,
-         "todosComitentes": False},
-        token, resultado_key="result", total_key="total", label="FCI comprobantes"
-    )
+def _es_fci(tipo: str) -> bool:
+    t = unicodedata.normalize("NFD", (tipo or "").upper())
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")  # strip diacritics
+    return "SUSCRI" in t or "RESCAT" in t
 
 
-def normalizar_fci(items: list, cmap: dict) -> list:
+def fetch_fci(comitentes: list, fd: str, fh: str, token: str, id_usuario: int) -> list:
+    def _uno(c):
+        body = {
+            "skip": 0, "take": 500, "order": [],
+            "idUsuarioLogueado": id_usuario, "idComitente": c["id"],
+            "fechaDesde": f"{fd}T00:00:00.000Z", "fechaHasta": f"{fh}T23:59:59.999Z",
+            "idReporteTipo": 0, "comitenteSelected": str(c["id"]), "personaSelected": "",
+            "movimientosCuentaCorriente": 0,
+        }
+        resp = requests.post(f"{COHEN_BASE}/api/posicion/ListarMovimientos",
+                              headers=_H(token), json=body, timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("data", [])
+
+    todos = []
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        futuros = {ex.submit(_uno, c): c for c in comitentes}
+        for fut in as_completed(futuros):
+            try:
+                todos.extend(fut.result())
+            except Exception:
+                continue
+    fci = [it for it in todos if _es_fci(it.get("movimientoTipoDescripcion"))]
+    print(f"  FCI movimientos: {_B}{len(fci)}{_R} registros (de {len(todos)} movimientos totales)")
+    return fci
+
+
+_RE_ESPECIE = re.compile(r"Especie:\s*(\S+)", re.IGNORECASE)
+
+
+def normalizar_fci(items: list) -> list:
     out = []
     for t in items:
-        nro, nombre = cmap.get(t.get("idComitente"),
-                                (str(t.get("comitenteNumero", "")), t.get("comitenteDescripcion", "")))
-        solicitud = t.get("solicitudTipo", "") or ""
+        tipo = t.get("movimientoTipoDescripcion", "") or ""
+        # El leg de moneda de una Suscripción trae la divisa en
+        # instrumentoDescripcion (no el fondo) — el fondo sólo aparece en el
+        # texto libre de descripcion ("Especie: NOMBRE_FONDO").
+        fondo = t.get("instrumentoDescripcion", "") or ""
+        if not t.get("esModeloFondo"):
+            m = _RE_ESPECIE.search(t.get("descripcion", "") or "")
+            if m:
+                fondo = m.group(1)
         out.append({
-            "id":              t.get("idComprobante"),
-            "fecha":           _fmt_fecha(t.get("comprobanteFecha")),
-            "fecha_dia":       _fecha_dia(t.get("comprobanteFecha")),
-            "nro_cuenta":      str(nro),
-            "cliente":         nombre,
-            "fondo":           t.get("fondo", "") or "",
-            "solicitud_tipo":  solicitud,
-            "comprobante_tipo":t.get("comprobanteTipo", "") or "",
+            "id":              t.get("idMovimiento"),
+            "fecha":           _fmt_fecha(t.get("fechaConcertacion")),
+            "fecha_dia":       _fecha_dia(t.get("fechaConcertacion")),
+            "nro_cuenta":      str(t.get("comitenteNumero", "") or ""),
+            "cliente":         t.get("comitenteDescripcion", "") or "",
+            "fondo":           fondo,
+            "solicitud_tipo":  tipo,
+            "comprobante_tipo":tipo,
             "moneda":          t.get("monedaDescripcion", "") or "",
-            "importe":         float(t.get("importe") or 0),
-            "cuotapartes":     float(t.get("cantidadCuotapartes") or 0),
-            "cotizacion":      float(t.get("cotizacionCuotaparte") or 0),
+            "importe":         abs(float(t.get("importe") or 0)),
+            # ListarMovimientos no da cantidad de cuotapartes ni cotización
+            # por separado (sólo el importe en $/USD del movimiento).
+            "cuotapartes":     0.0,
+            "cotizacion":      0.0,
         })
     return out
 
@@ -1538,11 +1589,12 @@ def actualizar():
     comitentes = get_comitentes(token)
     ids        = [c["id"] for c in comitentes]
     cmap       = {c["id"]: parsear_comitente(c) for c in comitentes}
+    id_usuario = get_id_usuario(token)
     print(f"  {_G}[OK] Token{_R}  |  Comitentes: {_B}{len(comitentes)}{_R}")
 
     # Fetch paralelo de los 3 endpoints
     def _tf():  return fetch_transferencias(comitentes, FECHA_DESDE, FECHA_HASTA, token)
-    def _fci(): return fetch_fci(ids, FECHA_DESDE, FECHA_HASTA, token)
+    def _fci(): return fetch_fci(comitentes, FECHA_DESDE, FECHA_HASTA, token, id_usuario)
     def _ing(): return fetch_cta_cte(ids, FECHA_DESDE, FECHA_HASTA, token)
 
     resultados = {}
@@ -1557,7 +1609,7 @@ def actualizar():
                 resultados[key] = []
 
     tf  = normalizar_transferencias(resultados.get("tf", []), cmap)
-    fci = normalizar_fci(resultados.get("fci", []), cmap)
+    fci = normalizar_fci(resultados.get("fci", []))
     ing = normalizar_cte(resultados.get("ing", []), cmap)
 
     # Resumen
