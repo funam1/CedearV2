@@ -36,7 +36,8 @@ def _secrets() -> dict:
     with open(SECRETS_PATH, "rb") as f:
         return tomllib.load(f)
 
-FECHA_DESDE = (date.today() - timedelta(days=30)).isoformat()
+RANGO_DIAS  = 7  # ventana total que se mantiene cargada (incluye hoy)
+FECHA_DESDE = (date.today() - timedelta(days=RANGO_DIAS - 1)).isoformat()
 FECHA_HASTA = date.today().isoformat()
 
 PAGE_SIZE  = 500
@@ -719,6 +720,33 @@ tbody tr:hover{background:var(--sur2)}
 
 </div><!-- wrap -->
 
+<!-- ═══════════ MODAL DETALLE ═══════════ -->
+<!-- Tiene que ir ANTES del <script>: el script hace getElementById de estos
+     IDs (overlay, drawer, btnCopyDetail) al cargar. Si el modal quedara
+     después del script (como estaba antes), esos getElementById devuelven
+     null porque el navegador todavía no parseó ese HTML — el script tira
+     TypeError ahí mismo y corta en seco, sin llegar nunca al INIT de más
+     abajo (los filtros quedaban vacíos y "Por cliente" sin buscador por
+     esto, no por un problema de Streamlit). -->
+<div class="overlay" id="overlay" onclick="closeDrawer(event)">
+  <div class="drawer" id="drawer">
+    <div class="drawer-handle"></div>
+    <div class="drawer-hdr">
+      <span class="drawer-dot" id="dw-dot"></span>
+      <div class="drawer-title">
+        <h3 id="dw-title"></h3>
+        <small id="dw-sub"></small>
+      </div>
+      <span class="drawer-badge" id="dw-badge"></span>
+    </div>
+    <div class="drawer-body" id="dw-body"></div>
+    <div class="drawer-actions">
+      <button class="btn-copy-detail" id="btnCopyDetail">&#128203; Copiar para compartir</button>
+      <button class="btn-close-drawer" onclick="closeDrawer()">Cerrar</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ════════════════════════════════════════════════════════════════
 //  DATOS — pegá aquí los arrays TF, FCI, ING del script Python
@@ -756,13 +784,6 @@ function esc(s) {
   if (!s) return "";
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
-function todayStr() {
-  var d = new Date();
-  var m = d.getMonth() + 1; if (m < 10) m = "0" + m;
-  var dd = d.getDate(); if (dd < 10) dd = "0" + dd;
-  return d.getFullYear() + "-" + m + "-" + dd;
-}
-
 // ════════════════════════ TEMA ════════════════════════
 function applyTheme(t) {
   document.body.setAttribute("data-t", t);
@@ -782,6 +803,21 @@ document.getElementById("btnTheme").addEventListener("click", function() {
 // ════════════════════════ META ════════════════════════
 document.getElementById("metaRango").innerHTML = "Datos <b>" + META_DESDE + " → " + META_HASTA + "</b>";
 document.getElementById("metaTs").innerHTML = "Generado: <b>" + META_TS + "</b>";
+
+// No se puede buscar más atrás de lo que efectivamente se cargó (META_DESDE,
+// que Python fija a los últimos días de ventana) — se lo marca como límite
+// duro en los 3 pares de inputs de fecha, y clampFecha() lo refuerza en JS
+// por si el estado restaurado trae una fecha más vieja que la ventana actual.
+["tf-desde","tf-hasta","fci-desde","fci-hasta","ing-desde","ing-hasta"].forEach(function(id) {
+  var el = document.getElementById(id);
+  el.min = META_DESDE;
+  el.max = META_HASTA;
+});
+function clampFecha(d) {
+  if (!d || d < META_DESDE) return META_DESDE;
+  if (d > META_HASTA) return META_HASTA;
+  return d;
+}
 
 // ════════════════════════ TABS ════════════════════════
 var tabBtns = document.querySelectorAll(".tbtn");
@@ -856,6 +892,7 @@ function cargarEstado() {
 function _propagarFecha(d, h) {
   if (_syncingFecha) return;
   _syncingFecha = true;
+  d = clampFecha(d); h = clampFecha(h);
   FILTRO_DESDE = d; FILTRO_HASTA = h;
   document.getElementById("tf-desde").value  = d; document.getElementById("tf-hasta").value  = h;
   document.getElementById("fci-desde").value = d; document.getElementById("fci-hasta").value = h;
@@ -883,14 +920,14 @@ function restaurarFiltroFecha() {
     document.getElementById("ing-cli").value    = st.ingCli    || "";
     CLIENTE_ACTUAL = st.cliente || "";
   }
-  var d = (st && st.desde) || todayStr();
-  var h = (st && st.hasta) || todayStr();
+  var d = (st && st.desde) || META_HASTA;
+  var h = (st && st.hasta) || META_HASTA;
   _propagarFecha(d, h);
 }
 
 // ════════════════════════ VER HOY ════════════════════════
 function verHoy() {
-  var hoy = todayStr();
+  var hoy = META_HASTA;
   _propagarFecha(hoy, hoy);
 }
 document.getElementById("btnHoy").addEventListener("click", verHoy);
@@ -1535,26 +1572,6 @@ ingInitFiltros();
 restaurarFiltroFecha();
 buildClienteTab();
 </script>
-
-<!-- ═══════════ MODAL DETALLE ═══════════ -->
-<div class="overlay" id="overlay" onclick="closeDrawer(event)">
-  <div class="drawer" id="drawer">
-    <div class="drawer-handle"></div>
-    <div class="drawer-hdr">
-      <span class="drawer-dot" id="dw-dot"></span>
-      <div class="drawer-title">
-        <h3 id="dw-title"></h3>
-        <small id="dw-sub"></small>
-      </div>
-      <span class="drawer-badge" id="dw-badge"></span>
-    </div>
-    <div class="drawer-body" id="dw-body"></div>
-    <div class="drawer-actions">
-      <button class="btn-copy-detail" id="btnCopyDetail">&#128203; Copiar para compartir</button>
-      <button class="btn-close-drawer" onclick="closeDrawer()">Cerrar</button>
-    </div>
-  </div>
-</div>
 </body>
 </html>
 """

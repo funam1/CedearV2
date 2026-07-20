@@ -9,7 +9,7 @@ import json
 import time
 import streamlit as st
 import requests
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import transferencias_cohen as tc
@@ -321,8 +321,28 @@ def cargar_datos():
 # ── Carga de datos — Transferencias ─────────────────────────────────────────────
 
 
-def cargar_datos_transferencias():
-    """Obtiene token, comitentes, transferencias/FCI/ingresos. Guarda en session_state."""
+def _reemplazar_dia(viejas: list, nuevas: list, dia_iso: str) -> list:
+    """Pisa sólo las filas de `dia_iso` con `nuevas`; conserva el resto tal cual
+    estaba en caché (evita tener que volver a bajar toda la ventana de 7 días
+    en cada refresco automático)."""
+    resto = [r for r in viejas if r.get("fecha_dia") != dia_iso]
+    return resto + nuevas
+
+
+def cargar_datos_transferencias(full: bool = True):
+    """Obtiene token, comitentes, transferencias/FCI/ingresos. Guarda en session_state.
+
+    full=True  → recarga toda la ventana de tc.RANGO_DIAS días (primera carga
+                 del día, o del proceso).
+    full=False → sólo vuelve a pedir el día de hoy y pisa esas filas en la
+                 caché existente; los demás días de la ventana quedan como
+                 estaban, sin volver a bajarlos (así el refresco automático
+                 cada tc.INTERVAL_S no repite todo el fetch de 7 días).
+    """
+    hoy = date.today()
+    hoy_iso = hoy.isoformat()
+    rango_desde = (hoy - timedelta(days=tc.RANGO_DIAS - 1)).isoformat() if full else hoy_iso
+
     status_container = st.empty()
     with status_container.status(
         "⏳ Cargando transferencias desde Cohen...", expanded=True
@@ -336,12 +356,12 @@ def cargar_datos_transferencias():
         cmap = {c["id"]: tc.parsear_comitente(c) for c in comitentes}
         id_usuario = tc.get_id_usuario(token)
 
-        st.write("💸 Descargando transferencias, FCI e ingresos...")
+        st.write("💸 Descargando transferencias, FCI e ingresos..." if full else "💸 Actualizando movimientos de hoy...")
         with ThreadPoolExecutor(max_workers=3) as ex:
             futuros = {
-                ex.submit(tc.fetch_transferencias, comitentes, tc.FECHA_DESDE, tc.FECHA_HASTA, token): "tf",
-                ex.submit(tc.fetch_fci, comitentes, tc.FECHA_DESDE, tc.FECHA_HASTA, token, id_usuario): "fci",
-                ex.submit(tc.fetch_cta_cte, ids, tc.FECHA_DESDE, tc.FECHA_HASTA, token): "ing",
+                ex.submit(tc.fetch_transferencias, comitentes, rango_desde, hoy_iso, token): "tf",
+                ex.submit(tc.fetch_fci, comitentes, rango_desde, hoy_iso, token, id_usuario): "fci",
+                ex.submit(tc.fetch_cta_cte, ids, rango_desde, hoy_iso, token): "ing",
             }
             resultados = {}
             for fut in as_completed(futuros):
@@ -355,9 +375,21 @@ def cargar_datos_transferencias():
 
     status_container.empty()
 
-    st.session_state["tf_data"] = tc.normalizar_transferencias(resultados.get("tf", []), cmap)
-    st.session_state["tf_fci"] = tc.normalizar_fci(resultados.get("fci", []))
-    st.session_state["tf_ing"] = tc.normalizar_cte(resultados.get("ing", []), cmap)
+    tf_nuevo  = tc.normalizar_transferencias(resultados.get("tf", []), cmap)
+    fci_nuevo = tc.normalizar_fci(resultados.get("fci", []))
+    ing_nuevo = tc.normalizar_cte(resultados.get("ing", []), cmap)
+
+    if full:
+        st.session_state["tf_data"] = tf_nuevo
+        st.session_state["tf_fci"] = fci_nuevo
+        st.session_state["tf_ing"] = ing_nuevo
+        st.session_state["tf_range_desde"] = rango_desde
+    else:
+        st.session_state["tf_data"] = _reemplazar_dia(st.session_state.get("tf_data", []), tf_nuevo, hoy_iso)
+        st.session_state["tf_fci"] = _reemplazar_dia(st.session_state.get("tf_fci", []), fci_nuevo, hoy_iso)
+        st.session_state["tf_ing"] = _reemplazar_dia(st.session_state.get("tf_ing", []), ing_nuevo, hoy_iso)
+
+    st.session_state["tf_range_dia"] = hoy_iso  # día de la última carga (detecta el cambio de día)
     st.session_state["tf_ts"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     st.session_state["tf_loaded_at"] = time.time()
 
@@ -1368,15 +1400,22 @@ if pagina == "CEDEAR / GNR":
 
 # ── Transferencias ───────────────────────────────────────────────────────────
 elif pagina == "Transferencias":
-    tf_needs_refresh = False
-    if "tf_loaded_at" not in st.session_state:
-        tf_needs_refresh = True
-    elif time.time() - st.session_state["tf_loaded_at"] > tc.INTERVAL_S:
-        tf_needs_refresh = True
+    hoy_iso = date.today().isoformat()
+    # Carga completa (7 días): primera vez, o si cambió el día desde la
+    # última carga (la ventana entera se corre un día, hay que rebajarla).
+    # Si no, sólo se vuelve a pedir el día de hoy (ver cargar_datos_transferencias).
+    tf_needs_full = (
+        "tf_loaded_at" not in st.session_state
+        or st.session_state.get("tf_range_dia") != hoy_iso
+    )
+    tf_needs_refresh_hoy = (
+        not tf_needs_full
+        and time.time() - st.session_state["tf_loaded_at"] > tc.INTERVAL_S
+    )
 
-    if tf_needs_refresh:
+    if tf_needs_full or tf_needs_refresh_hoy:
         try:
-            cargar_datos_transferencias()
+            cargar_datos_transferencias(full=tf_needs_full)
         except Exception as e:
             st.error(f"❌ Error al conectar con la API de Cohen: {e}")
             st.stop()
@@ -1385,8 +1424,9 @@ elif pagina == "Transferencias":
     fci = st.session_state.get("tf_fci", [])
     ing = st.session_state.get("tf_ing", [])
     tf_ts = st.session_state.get("tf_ts", "")
+    tf_range_desde = st.session_state.get("tf_range_desde", hoy_iso)
 
-    html_tf = tc.generar_html(tf, fci, ing, tc.FECHA_DESDE, tc.FECHA_HASTA, tf_ts, user_name)
+    html_tf = tc.generar_html(tf, fci, ing, tf_range_desde, hoy_iso, tf_ts, user_name)
     st.components.v1.html(html_tf, height=900, scrolling=True)
 
 # ── Auto-rerun de Streamlit para refrescar datos ───────────────────────────────
