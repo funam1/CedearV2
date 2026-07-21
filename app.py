@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import transferencias_cohen as tc
+import mercado
 
 # ── Configuración ─────────────────────────────────────────────────────────────
 
@@ -525,6 +526,8 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
 
   <ul class="nav nav-tabs mb-0" id="mainTabs">
     <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-tabla">Tabla completa</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-performance">Performance</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-mercado">Volatilidad / Correlación</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-cliente">Por cliente</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-ticker">Por ticker</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-charts">Rankers</a></li>
@@ -571,6 +574,73 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
         </table>
       </div>
       <div class="text-muted mt-2" style="font-size:.72rem" id="count-label"></div>
+    </div>
+
+    <!-- ── PERFORMANCE POR CLIENTE (CEDEAR + Acciones) ── -->
+    <div class="tab-pane fade" id="tab-performance">
+      <div class="d-flex gap-2 mb-2 flex-wrap align-items-end">
+        <div>
+          <label class="form-label" style="font-size:.72rem">Ganancia realizada desde</label>
+          <input type="date" id="perf-desde" class="form-control form-control-sm" style="width:150px" onchange="renderPerformance()">
+        </div>
+        <div class="d-flex gap-1">
+          <button class="btn btn-sm btn-outline-secondary" onclick="perfPreset('ytd')">YTD</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="perfPreset('90d')">90d</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="perfPreset('1y')">1 año</button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="perfPreset('todo')">Todo</button>
+        </div>
+        <button class="btn btn-sm btn-outline-primary copy-btn ms-auto" onclick="copyTable('table-performance')">Copiar</button>
+      </div>
+      <p class="text-muted mb-3" style="font-size:.72rem">
+        Ganancia realizada del período elegido (siempre hasta hoy) + P&amp;L no realizado actual de las
+        posiciones abiertas, comparado contra el capital hoy invertido (costo de las posiciones abiertas —
+        no incluye capital ya rotado/cerrado dentro del período).
+      </p>
+      <div class="table-wrapper">
+        <table class="table table-sm table-hover" id="table-performance">
+          <thead><tr>
+            <th onclick="sortTable('table-performance',0)">Cuenta</th>
+            <th onclick="sortTable('table-performance',1)">Cliente</th>
+            <th onclick="sortTable('table-performance',2)" class="text-end">Ganancia realizada ARS</th>
+            <th onclick="sortTable('table-performance',3)" class="text-end">P&amp;L no realizado ARS</th>
+            <th onclick="sortTable('table-performance',4)" class="text-end">Resultado total ARS</th>
+            <th onclick="sortTable('table-performance',5)" class="text-end">Capital invertido ARS</th>
+            <th onclick="sortTable('table-performance',6)" class="text-end">Exposición actual ARS</th>
+            <th onclick="sortTable('table-performance',7)" class="text-end">Performance % s/ capital invertido</th>
+          </tr></thead>
+          <tbody id="tbody-performance"></tbody>
+        </table>
+      </div>
+      <div class="text-muted mt-2" style="font-size:.72rem" id="performance-count"></div>
+    </div>
+
+    <!-- ── VOLATILIDAD / CORRELACIÓN (a demanda, no auto-refresca) ── -->
+    <div class="tab-pane fade" id="tab-mercado">
+      <div id="mercado-vacio" class="text-muted" style="font-size:.8rem">
+        Todavía no se calculó. Usá los controles de arriba de la página (fuera de esta tabla) y tocá
+        "Calcular volatilidad y correlación" — no se recalcula solo, tenés que pedirlo vos.
+      </div>
+      <div id="mercado-contenido" style="display:none">
+        <p class="text-muted" style="font-size:.72rem" id="mercado-meta"></p>
+        <div id="mercado-sin-cobertura" class="mb-3"></div>
+        <div class="section-title">Volatilidad anualizada</div>
+        <div class="table-wrapper mb-4" style="max-height:320px">
+          <table class="table table-sm table-hover" id="table-vol">
+            <thead><tr>
+              <th onclick="sortTable('table-vol',0)">Ticker</th>
+              <th onclick="sortTable('table-vol',1)" class="text-end">Vol. anualizada</th>
+              <th onclick="sortTable('table-vol',2)" class="text-end">Observaciones</th>
+            </tr></thead>
+            <tbody id="tbody-vol"></tbody>
+          </table>
+        </div>
+        <div class="section-title">Matriz de correlación</div>
+        <div style="overflow:auto;max-height:600px">
+          <table class="table table-bordered table-sm mb-0" id="corr-table">
+            <thead id="corr-head"></thead><tbody id="corr-body"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <!-- ── POR CLIENTE ── -->
@@ -764,6 +834,7 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
 const DATA    = __DATA_JSON__;
 const DATA_GR = __DATA_GR_JSON__;
 const MEP     = __MEP__;
+const MERCADO = __MERCADO_JSON__;
 
 // ── Utils ──────────────────────────────────────────────────────────────────
 const fmt    = (v,d=0) => v==null?'':Number(v).toLocaleString('es-AR',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -858,6 +929,102 @@ function makeAutocomplete(inputId, listId, items, onSelect){
     onSelect(el.dataset.val);
   });
   document.addEventListener('click',e=>{if(!inp.contains(e.target)&&!lst.contains(e.target))lst.style.display='none';});
+}
+
+// ── Performance por cliente (CEDEAR + Acciones) ─────────────────────────────
+function perfDefaultDesde(){
+  const hoy=new Date();
+  return new Date(hoy.getFullYear(),0,1).toISOString().slice(0,10); // 1 de enero del año en curso
+}
+function perfPreset(tipo){
+  const el=document.getElementById('perf-desde');
+  const hoy=new Date();
+  let d=null;
+  if(tipo==='ytd') d=new Date(hoy.getFullYear(),0,1);
+  else if(tipo==='90d'){ d=new Date(hoy); d.setDate(d.getDate()-90); }
+  else if(tipo==='1y'){ d=new Date(hoy); d.setFullYear(d.getFullYear()-1); }
+  // 'todo' deja d=null -> sin filtro, toma toda la ganancia realizada disponible
+  el.value = d ? d.toISOString().slice(0,10) : '';
+  renderPerformance();
+}
+function buildPerformanceTab(){
+  document.getElementById('perf-desde').value = perfDefaultDesde();
+  renderPerformance();
+}
+function renderPerformance(){
+  const desde = document.getElementById('perf-desde').value; // '' = Todo, sin piso de fecha
+  const porCliente = {};
+  const asegurar = (k, cliente) => {
+    if(!porCliente[k]) porCliente[k]={nro_cuenta:k, cliente, gr_ars:0, pnl_ars:0, costo_ars:0, valor_ars:0};
+    return porCliente[k];
+  };
+  DATA.forEach(d=>{
+    const p=asegurar(d.nro_cuenta, d.cliente);
+    p.pnl_ars += d.pnl_ars||0;
+    p.costo_ars += d.costo_ars||0;
+    p.valor_ars += d.valor_ars||0;
+  });
+  DATA_GR.forEach(d=>{
+    if(desde && d.fecha < desde) return;
+    const p=asegurar(d.nro_cuenta, d.cliente);
+    p.gr_ars += d.gr_ars||0;
+  });
+  const rows = Object.values(porCliente).map(p=>{
+    const resultado_total_ars = p.gr_ars + p.pnl_ars;
+    const performance_pct = p.costo_ars ? resultado_total_ars/p.costo_ars*100 : null;
+    return {...p, resultado_total_ars, performance_pct};
+  }).sort((a,b)=>b.resultado_total_ars-a.resultado_total_ars);
+
+  document.getElementById('tbody-performance').innerHTML = rows.map(p=>`
+    <tr>
+      <td><strong>${p.nro_cuenta}</strong></td>
+      <td>${p.cliente}</td>
+      <td class="text-end ${cls(p.gr_ars)}">${fmt(p.gr_ars)}</td>
+      <td class="text-end ${cls(p.pnl_ars)}">${fmt(p.pnl_ars)}</td>
+      <td class="text-end ${cls(p.resultado_total_ars)}">${fmt(p.resultado_total_ars)}</td>
+      <td class="text-end">${fmt(p.costo_ars)}</td>
+      <td class="text-end text-primary">${fmt(p.valor_ars)}</td>
+      <td class="text-end">${p.performance_pct!=null?pnlBadge(p.performance_pct):'—'}</td>
+    </tr>`).join('');
+  document.getElementById('performance-count').textContent =
+    `${rows.length} clientes — ganancia realizada ${desde?('desde '+desde):'de todo el histórico disponible'}, P&L no realizado siempre actual`;
+}
+
+// ── Volatilidad / Correlación (viene calculado desde Python, a demanda) ────
+function renderMercado(){
+  if(!MERCADO || !MERCADO.corr_tickers || !MERCADO.corr_tickers.length){
+    document.getElementById('mercado-vacio').style.display='';
+    document.getElementById('mercado-contenido').style.display='none';
+    return;
+  }
+  document.getElementById('mercado-vacio').style.display='none';
+  document.getElementById('mercado-contenido').style.display='';
+  document.getElementById('mercado-meta').textContent = `Calculado ${MERCADO.fecha_calculo}`;
+
+  const sc = MERCADO.sin_cobertura||[];
+  document.getElementById('mercado-sin-cobertura').innerHTML = sc.length
+    ? `<div class="alert alert-warning py-2" style="font-size:.75rem">Sin datos de mercado para: ${sc.join(', ')}</div>`
+    : '';
+
+  document.getElementById('tbody-vol').innerHTML = (MERCADO.vol||[]).map(v=>`
+    <tr><td><strong>${v.ticker}</strong></td>
+      <td class="text-end">${fmtPct(v.vol_anualizada_pct)}</td>
+      <td class="text-end text-muted">${v.n_obs}</td></tr>`).join('')
+    || '<tr><td colspan="3" class="text-center text-muted py-3">Sin datos</td></tr>';
+
+  const tks = MERCADO.corr_tickers;
+  const mat = MERCADO.corr_matrix;
+  const hc = v => { if(v==null) return 'var(--sur2)'; if(v>=0.7) return '#163f2d'; if(v>=0.3) return 'rgba(46,158,107,.35)';
+    if(v>-0.3) return 'transparent'; if(v>-0.7) return 'rgba(196,69,63,.35)'; return '#4a1a17'; };
+  const htc = v => (v!=null && Math.abs(v)>=0.7) ? '#fff' : 'var(--tx)';
+  document.getElementById('corr-head').innerHTML = '<tr><th style="min-width:70px"></th>' +
+    tks.map(t=>`<th style="font-size:.62rem;white-space:nowrap">${t}</th>`).join('') + '</tr>';
+  document.getElementById('corr-body').innerHTML = tks.map((t,i)=>
+    `<tr><td style="white-space:nowrap;font-size:.72rem"><strong>${t}</strong></td>` +
+    tks.map((_,j)=>{
+      const v=mat[i][j];
+      return `<td class="heat-cell" style="background:${hc(v)};color:${htc(v)}">${v!=null?v.toFixed(2):''}</td>`;
+    }).join('') + '</tr>').join('');
 }
 
 // ── Por cliente ────────────────────────────────────────────────────────────
@@ -1212,6 +1379,8 @@ setInterval(()=>{rem--;if(rem<=0){rem=REFRESH_S;}const m=Math.floor(rem/60),s=re
 // ── Init ───────────────────────────────────────────────────────────────────
 renderKPIs();
 buildMainTable();
+buildPerformanceTab();
+renderMercado();
 buildClienteTab();
 buildTickerTab();
 buildCharts();
@@ -1228,7 +1397,8 @@ def _js_safe(data) -> str:
 
 
 def generar_html(
-    posiciones: list, gr: list, mep: float, ts: str, user_name: str = ""
+    posiciones: list, gr: list, mep: float, ts: str, user_name: str = "",
+    mercado_result: dict | None = None,
 ) -> str:
     return (
         HTML_TEMPLATE.replace("__DATA_JSON__", _js_safe(posiciones))
@@ -1238,6 +1408,7 @@ def generar_html(
         .replace("__TS__", ts)
         .replace("__INTERVAL_S__", str(INTERVAL_S))
         .replace("__USER_NAME__", user_name)
+        .replace("__MERCADO_JSON__", _js_safe(mercado_result))
     )
 
 
@@ -1392,7 +1563,35 @@ if pagina == "CEDEAR / GNR":
         st.error(f"❌ Error al conectar con la API de Cohen: {e}")
         st.stop()
 
-    html_content = generar_html(gnr, gr, mep, ts, user_name)
+    with st.expander("📊 Volatilidad / Correlación de mercado (a demanda — no se recalcula sola)"):
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            n_dias_mercado = st.number_input(
+                "Días de historia", min_value=20, max_value=250, value=60, key="mercado_n_dias"
+            )
+        with col2:
+            top_n_mercado = st.number_input(
+                "Top N tickers por exposición", min_value=5, max_value=150, value=25, key="mercado_top_n"
+            )
+        with col3:
+            st.caption(
+                "Usa Alpaca (EEUU) para CEDEAR y Acciones con ADR conocido; Alpha Vantage sólo como respaldo. "
+                "No cubre acciones argentinas locales sin ADR."
+            )
+        if st.button("Calcular volatilidad y correlación"):
+            try:
+                st.session_state["mercado_result"] = mercado.calcular_vol_corr(
+                    gnr,
+                    int(n_dias_mercado),
+                    int(top_n_mercado),
+                    st.secrets["ALPACA_API_KEY"],
+                    st.secrets["ALPACA_API_SECRET"],
+                    st.secrets["ALPHAVANTAGE_API_KEY"],
+                )
+            except Exception as e:
+                st.error(f"❌ Error calculando volatilidad/correlación: {e}")
+
+    html_content = generar_html(gnr, gr, mep, ts, user_name, st.session_state.get("mercado_result"))
     st.components.v1.html(html_content, height=900, scrolling=True)
 
 # ── Transferencias ───────────────────────────────────────────────────────────
