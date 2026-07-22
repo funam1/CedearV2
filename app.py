@@ -1633,19 +1633,34 @@ if pagina == "CEDEAR / GNR":
                 "No cubre acciones argentinas locales sin ADR."
             )
         if st.button("Calcular volatilidad y correlación"):
+            progress_bar = st.progress(0, text="Preparando...")
+
+            def _reportar_progreso(hechos, total):
+                if total:
+                    progress_bar.progress(hechos / total, text=f"Descargando precios: {hechos}/{total}")
+                else:
+                    progress_bar.progress(1.0, text="Todo ya estaba en caché")
+
             try:
-                st.session_state["mercado_result"] = mercado.calcular_vol_corr(
+                mercado.calcular_vol_corr(
                     gnr,
                     int(n_dias_mercado),
                     int(top_n_mercado),
                     st.secrets["ALPACA_API_KEY"],
                     st.secrets["ALPACA_API_SECRET"],
                     st.secrets["ALPHAVANTAGE_API_KEY"],
+                    on_progress=_reportar_progreso,
                 )
+                progress_bar.progress(1.0, text="✅ Listo")
             except Exception as e:
                 st.error(f"❌ Error calculando volatilidad/correlación: {e}")
+            finally:
+                progress_bar.empty()
 
-    html_content = generar_html(gnr, gr, mep, ts, user_name, st.session_state.get("mercado_result"))
+    # Último resultado calculado por CUALQUIER usuario en este proceso (no
+    # session_state) — así todos ven el mismo cálculo sin tener que pedirlo
+    # cada uno por su lado.
+    html_content = generar_html(gnr, gr, mep, ts, user_name, mercado.obtener_ultimo_resultado())
     st.components.v1.html(html_content, height=900, scrolling=True)
 
 # ── Transferencias ───────────────────────────────────────────────────────────

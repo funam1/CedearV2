@@ -108,6 +108,18 @@ def _guardar_cache(cache: dict) -> None:
 _CACHE = _cargar_cache()  # dict de módulo — compartido entre todas las sesiones del proceso
 _AV_CONTADOR = {"dia": None, "usadas": 0}
 
+# Último resultado calculado, por CUALQUIER usuario — dict de módulo, mismo
+# criterio que _CACHE: vive mientras el proceso esté vivo, se comparte entre
+# todas las sesiones. Así, si un usuario hace click en "Calcular", el resto
+# ve el resultado ya calculado sin tener que clickear ellos también.
+_ULTIMO_RESULTADO = {"resultado": None}
+
+
+def obtener_ultimo_resultado():
+    """Último resultado de calcular_vol_corr calculado por cualquier sesión
+    en este proceso, o None si todavía nadie calculó nada."""
+    return _ULTIMO_RESULTADO["resultado"]
+
 
 def _cache_valido(entry) -> bool:
     if not entry or "ts" not in entry:
@@ -175,8 +187,13 @@ def fetch_precios_alphavantage(simbolo: str, n_dias: int, api_key: str) -> list:
 # ── Orquestación ─────────────────────────────────────────────────────────────
 
 def calcular_vol_corr(posiciones: list, n_dias: int, top_n: int,
-                       alpaca_key: str, alpaca_secret: str, alphavantage_key: str) -> dict:
+                       alpaca_key: str, alpaca_secret: str, alphavantage_key: str,
+                       on_progress=None) -> dict:
     """posiciones: filas de DATA (GNR), con ticker/tipo/valor_usd.
+
+    on_progress, si se pasa, se llama como on_progress(hechos, total) a
+    medida que se van resolviendo los tickers que hacía falta pedir (los
+    que ya estaban en cache no cuentan, se resuelven al instante).
 
     Devuelve un dict con:
       vol: [{"ticker", "vol_anualizada_pct", "n_obs"}, ...] ordenado desc.
@@ -213,6 +230,18 @@ def calcular_vol_corr(posiciones: list, n_dias: int, top_n: int,
         proveedor, simbolo = ruteo
         (alpaca_a_pedir if proveedor == "alpaca" else alphavantage_a_pedir).append((t, simbolo))
 
+    total_a_pedir = len(alpaca_a_pedir) + len(alphavantage_a_pedir)
+    hechos = 0
+
+    def _avanzar():
+        nonlocal hechos
+        hechos += 1
+        if on_progress:
+            on_progress(hechos, total_a_pedir)
+
+    if on_progress:
+        on_progress(0, total_a_pedir)
+
     if alpaca_a_pedir:
         with ThreadPoolExecutor(max_workers=8) as ex:
             futuros = {
@@ -227,10 +256,12 @@ def calcular_vol_corr(posiciones: list, n_dias: int, top_n: int,
                     _CACHE[t] = {"precios": precios, "ts": time.time()}
                 else:
                     sin_cobertura.append(t)
+                _avanzar()
 
     for t, simbolo in alphavantage_a_pedir:
         if not _av_cuota_disponible():
             sin_cobertura.append(t)
+            _avanzar()
             continue
         precios = fetch_precios_alphavantage(simbolo, n_dias, alphavantage_key)
         if precios:
@@ -238,16 +269,19 @@ def calcular_vol_corr(posiciones: list, n_dias: int, top_n: int,
             _CACHE[t] = {"precios": precios, "ts": time.time()}
         else:
             sin_cobertura.append(t)
+        _avanzar()
         time.sleep(1)  # respetar burst limit (~1 req/seg) de Alpha Vantage
 
     _guardar_cache(_CACHE)
 
     fecha_calculo = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     if pd is None or np is None or not series:
-        return {
+        resultado = {
             "vol": [], "corr_tickers": [], "corr_matrix": [],
             "sin_cobertura": sorted(set(sin_cobertura)), "fecha_calculo": fecha_calculo,
         }
+        _ULTIMO_RESULTADO["resultado"] = resultado
+        return resultado
 
     df = pd.DataFrame({t: {p["fecha"]: p["close"] for p in precios} for t, precios in series.items()}).sort_index()
     # Log-retornos (ln(P_t/P_t-1)) en vez de retornos simples: es lo correcto
@@ -271,10 +305,12 @@ def calcular_vol_corr(posiciones: list, n_dias: int, top_n: int,
     corr_tickers = list(corr_df.columns)
     corr_matrix = [[(round(float(v), 3) if pd.notna(v) else None) for v in row] for row in corr_df.values]
 
-    return {
+    resultado = {
         "vol": vol,
         "corr_tickers": corr_tickers,
         "corr_matrix": corr_matrix,
         "sin_cobertura": sorted(set(sin_cobertura)),
         "fecha_calculo": fecha_calculo,
     }
+    _ULTIMO_RESULTADO["resultado"] = resultado
+    return resultado
