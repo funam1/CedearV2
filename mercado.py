@@ -160,7 +160,7 @@ def fetch_precios_alphavantage(simbolo: str, n_dias: int, api_key: str) -> list:
 
 def calcular_vol_corr(posiciones: list, n_dias: int, top_n: int,
                        alpaca_key: str, alpaca_secret: str, alphavantage_key: str) -> dict:
-    """posiciones: filas de DATA (GNR), con ticker/tipo/valor_ars.
+    """posiciones: filas de DATA (GNR), con ticker/tipo/valor_usd.
 
     Devuelve un dict con:
       vol: [{"ticker", "vol_anualizada_pct", "n_obs"}, ...] ordenado desc.
@@ -174,7 +174,7 @@ def calcular_vol_corr(posiciones: list, n_dias: int, top_n: int,
         t = p.get("ticker")
         if not t:
             continue
-        exposicion[t] = exposicion.get(t, 0) + (p.get("valor_ars") or 0)
+        exposicion[t] = exposicion.get(t, 0) + (p.get("valor_usd") or 0)
         tipos[t] = p.get("tipo", "")
 
     tickers_ordenados = sorted(exposicion, key=lambda t: -exposicion[t])

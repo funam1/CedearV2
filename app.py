@@ -185,8 +185,22 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                     r.get("saldoValorizadoARS") or r.get("saldoValorizado") or 0
                 )
                 valor_neto = round(valor_ars * ARANCEL, 2)
-                valor_usd = round(valor_ars / mep, 2) if mep else None
-                valor_neto_usd = round(valor_neto / mep, 2) if mep else None
+                costo_usd = float(r.get("costoTotalUSD") or 0)
+                pnl_usd = float(r.get("rendimientoUSD") or 0)
+                # saldoValorizadoUSD viene nativo de Cohen — más preciso que
+                # convertir valor_ars con el MEP de hoy (evita una doble
+                # conversión y usa el mismo dólar que ya usa Cohen internamente
+                # para costoTotalUSD/rendimientoUSD). Pero a veces Cohen lo
+                # devuelve en 0/null puntualmente aunque costoTotalUSD y
+                # rendimientoUSD sí vengan bien — en ese caso lo reconstruimos
+                # con esos dos (costo + P&L), que sí son confiables.
+                valor_usd_raw = r.get("saldoValorizadoUSD")
+                valor_usd = (
+                    round(float(valor_usd_raw), 2)
+                    if valor_usd_raw
+                    else round(costo_usd + pnl_usd, 2)
+                )
+                valor_neto_usd = round(valor_usd * ARANCEL, 2)
                 posiciones.append(
                     {
                         "id_comitente": id_com,
@@ -207,10 +221,10 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                         "valor_usd": valor_usd,
                         "valor_neto_usd": valor_neto_usd,
                         "costo_ars": float(r.get("costoTotalARS") or 0),
-                        "costo_usd": float(r.get("costoTotalUSD") or 0),
+                        "costo_usd": costo_usd,
                         "pnl_ars": float(r.get("rendimientoARS") or 0),
                         "pnl_pct_ars": float(r.get("rendimientoPctARS") or 0),
-                        "pnl_usd": float(r.get("rendimientoUSD") or 0),
+                        "pnl_usd": pnl_usd,
                         "pnl_pct_usd": float(r.get("rendimientoPctUSD") or 0),
                         "var_dia_ars": float(r.get("varDiariaARS") or 0),
                         "var_dia_pct": float(r.get("varDiariaPctARS") or 0),
@@ -273,6 +287,25 @@ def fetch_gr(token: str, mep: float, progress_bar=None) -> list:
                         ),
                         "importe_venta_ars": float(
                             it.get("importeVentaMonedaBase") or 0
+                        ),
+                        # Pese al nombre "Rentabilidad", estos son los mismos
+                        # precios/importes de compra-venta pero en dólares (al
+                        # tipo de cambio de cada fecha, no al MEP de hoy) —
+                        # verificado: gananciaRealizadaMonedaBase/importeCompraMonedaBase
+                        # (retorno en $) difiere del retorno implícito en estos
+                        # campos exactamente como se espera por la devaluación
+                        # entre la fecha de compra y la de venta.
+                        "precio_compra_usd": float(
+                            it.get("precioCompraRentabilidad") or 0
+                        ),
+                        "precio_venta_usd": float(
+                            it.get("precioVentaRentabilidad") or 0
+                        ),
+                        "importe_compra_usd": float(
+                            it.get("importeCompraRentabilidad") or 0
+                        ),
+                        "importe_venta_usd": float(
+                            it.get("importeVentaRentabilidad") or 0
                         ),
                         "gr_ars": gr_ars,
                         "gr_pct_ars": float(it.get("porcentajeMonedaBase") or 0),
@@ -561,14 +594,14 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
             <th onclick="sortTable('main-table',2)">Ticker</th>
             <th onclick="sortTable('main-table',3)">Tipo</th>
             <th onclick="sortTable('main-table',4)" class="text-end">Cant.</th>
-            <th onclick="sortTable('main-table',5)" class="text-end">Precio ARS</th>
-            <th onclick="sortTable('main-table',6)" class="text-end">Valor ARS</th>
-            <th onclick="sortTable('main-table',7)" class="text-end">Valor Neto ARS</th>
-            <th onclick="sortTable('main-table',8)" class="text-end">Valor Neto USD</th>
-            <th onclick="sortTable('main-table',9)" class="text-end">Costo ARS</th>
-            <th onclick="sortTable('main-table',10)" class="text-end">P&amp;L % ARS</th>
-            <th onclick="sortTable('main-table',11)" class="text-end">P&amp;L USD</th>
-            <th onclick="sortTable('main-table',12)" class="text-end">P&amp;L % USD</th>
+            <th onclick="sortTable('main-table',5)" class="text-end">Precio USD</th>
+            <th onclick="sortTable('main-table',6)" class="text-end">Valor USD</th>
+            <th onclick="sortTable('main-table',7)" class="text-end">Valor Neto USD</th>
+            <th onclick="sortTable('main-table',8)" class="text-end">Costo USD</th>
+            <th onclick="sortTable('main-table',9)" class="text-end">P&amp;L USD</th>
+            <th onclick="sortTable('main-table',10)" class="text-end">P&amp;L % USD</th>
+            <th onclick="sortTable('main-table',11)" class="text-end text-muted">Valor ARS (ref.)</th>
+            <th onclick="sortTable('main-table',12)" class="text-end text-muted">P&amp;L ARS (ref.)</th>
           </tr></thead>
           <tbody id="main-tbody"></tbody>
         </table>
@@ -592,21 +625,25 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
         <button class="btn btn-sm btn-outline-primary copy-btn ms-auto" onclick="copyTable('table-performance')">Copiar</button>
       </div>
       <p class="text-muted mb-3" style="font-size:.72rem">
-        Ganancia realizada del período elegido (siempre hasta hoy) + P&amp;L no realizado actual de las
-        posiciones abiertas, comparado contra el capital hoy invertido (costo de las posiciones abiertas —
-        no incluye capital ya rotado/cerrado dentro del período).
+        Todo medido en dólares (costo/valor/precio nativos en USD de Cohen, no convertidos vía MEP).
+        Ganancia realizada del período elegido (siempre hasta hoy, al tipo de cambio de cada operación) +
+        P&amp;L no realizado actual de las posiciones abiertas (al dólar de hoy), comparado contra el capital
+        hoy invertido (costo en USD de las posiciones abiertas — no incluye capital ya rotado/cerrado dentro
+        del período).
       </p>
       <div class="table-wrapper">
         <table class="table table-sm table-hover" id="table-performance">
           <thead><tr>
             <th onclick="sortTable('table-performance',0)">Cuenta</th>
             <th onclick="sortTable('table-performance',1)">Cliente</th>
-            <th onclick="sortTable('table-performance',2)" class="text-end">Ganancia realizada ARS</th>
-            <th onclick="sortTable('table-performance',3)" class="text-end">P&amp;L no realizado ARS</th>
-            <th onclick="sortTable('table-performance',4)" class="text-end">Resultado total ARS</th>
-            <th onclick="sortTable('table-performance',5)" class="text-end">Capital invertido ARS</th>
-            <th onclick="sortTable('table-performance',6)" class="text-end">Exposición actual ARS</th>
+            <th onclick="sortTable('table-performance',2)" class="text-end">Ganancia realizada USD</th>
+            <th onclick="sortTable('table-performance',3)" class="text-end">P&amp;L no realizado USD</th>
+            <th onclick="sortTable('table-performance',4)" class="text-end">Resultado total USD</th>
+            <th onclick="sortTable('table-performance',5)" class="text-end">Capital invertido USD</th>
+            <th onclick="sortTable('table-performance',6)" class="text-end">Exposición actual USD</th>
             <th onclick="sortTable('table-performance',7)" class="text-end">Performance % s/ capital invertido</th>
+            <th onclick="sortTable('table-performance',8)" class="text-end text-muted">Resultado total ARS (ref.)</th>
+            <th onclick="sortTable('table-performance',9)" class="text-end text-muted">Capital invertido ARS (ref.)</th>
           </tr></thead>
           <tbody id="tbody-performance"></tbody>
         </table>
@@ -661,14 +698,14 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
             <th onclick="sortTable('table-cliente',1)">Descripcion</th>
             <th onclick="sortTable('table-cliente',2)">Tipo</th>
             <th onclick="sortTable('table-cliente',3)" class="text-end">Cant.</th>
-            <th onclick="sortTable('table-cliente',4)" class="text-end">Precio ARS</th>
-            <th onclick="sortTable('table-cliente',5)" class="text-end">Valor ARS</th>
-            <th onclick="sortTable('table-cliente',6)" class="text-end">Valor Neto ARS</th>
-            <th onclick="sortTable('table-cliente',7)" class="text-end">Valor Neto USD</th>
-            <th onclick="sortTable('table-cliente',8)" class="text-end">Costo ARS</th>
-            <th onclick="sortTable('table-cliente',9)" class="text-end">P&amp;L % ARS</th>
-            <th onclick="sortTable('table-cliente',10)" class="text-end">P&amp;L USD</th>
-            <th onclick="sortTable('table-cliente',11)" class="text-end">P&amp;L % USD</th>
+            <th onclick="sortTable('table-cliente',4)" class="text-end">Precio USD</th>
+            <th onclick="sortTable('table-cliente',5)" class="text-end">Valor USD</th>
+            <th onclick="sortTable('table-cliente',6)" class="text-end">Valor Neto USD</th>
+            <th onclick="sortTable('table-cliente',7)" class="text-end">Costo USD</th>
+            <th onclick="sortTable('table-cliente',8)" class="text-end">P&amp;L USD</th>
+            <th onclick="sortTable('table-cliente',9)" class="text-end">P&amp;L % USD</th>
+            <th onclick="sortTable('table-cliente',10)" class="text-end text-muted">Valor ARS (ref.)</th>
+            <th onclick="sortTable('table-cliente',11)" class="text-end text-muted">P&amp;L ARS (ref.)</th>
           </tr></thead>
           <tbody id="tbody-cliente"></tbody>
         </table>
@@ -692,14 +729,14 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
             <th onclick="sortTable('table-ticker',0)">Nro</th>
             <th onclick="sortTable('table-ticker',1)">Cliente</th>
             <th onclick="sortTable('table-ticker',2)" class="text-end">Cant.</th>
-            <th onclick="sortTable('table-ticker',3)" class="text-end">Precio ARS</th>
-            <th onclick="sortTable('table-ticker',4)" class="text-end">Valor ARS</th>
-            <th onclick="sortTable('table-ticker',5)" class="text-end">Valor Neto ARS</th>
-            <th onclick="sortTable('table-ticker',6)" class="text-end">Valor Neto USD</th>
-            <th onclick="sortTable('table-ticker',7)" class="text-end">Costo ARS</th>
-            <th onclick="sortTable('table-ticker',8)" class="text-end">P&amp;L % ARS</th>
-            <th onclick="sortTable('table-ticker',9)" class="text-end">P&amp;L USD</th>
-            <th onclick="sortTable('table-ticker',10)" class="text-end">P&amp;L % USD</th>
+            <th onclick="sortTable('table-ticker',3)" class="text-end">Precio USD</th>
+            <th onclick="sortTable('table-ticker',4)" class="text-end">Valor USD</th>
+            <th onclick="sortTable('table-ticker',5)" class="text-end">Valor Neto USD</th>
+            <th onclick="sortTable('table-ticker',6)" class="text-end">Costo USD</th>
+            <th onclick="sortTable('table-ticker',7)" class="text-end">P&amp;L USD</th>
+            <th onclick="sortTable('table-ticker',8)" class="text-end">P&amp;L % USD</th>
+            <th onclick="sortTable('table-ticker',9)" class="text-end text-muted">Valor ARS (ref.)</th>
+            <th onclick="sortTable('table-ticker',10)" class="text-end text-muted">P&amp;L ARS (ref.)</th>
           </tr></thead>
           <tbody id="tbody-ticker"></tbody>
         </table>
@@ -709,10 +746,10 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
     <!-- ── RANKERS ── -->
     <div class="tab-pane fade" id="tab-charts">
       <div class="row g-3">
-        <div class="col-md-6"><div class="section-title">Top 10 ganancias por posicion (ARS)</div><canvas id="chart-gainers" height="250"></canvas></div>
-        <div class="col-md-6"><div class="section-title">Top 10 perdidas por posicion (ARS)</div><canvas id="chart-losers" height="250"></canvas></div>
-        <div class="col-md-6"><div class="section-title">Mejores tickers (P&amp;L total ARS)</div><canvas id="chart-ticker-gain" height="250"></canvas></div>
-        <div class="col-md-6"><div class="section-title">Peores tickers (P&amp;L total ARS)</div><canvas id="chart-ticker-loss" height="250"></canvas></div>
+        <div class="col-md-6"><div class="section-title">Top 10 ganancias por posicion (USD)</div><canvas id="chart-gainers" height="250"></canvas></div>
+        <div class="col-md-6"><div class="section-title">Top 10 perdidas por posicion (USD)</div><canvas id="chart-losers" height="250"></canvas></div>
+        <div class="col-md-6"><div class="section-title">Mejores tickers (P&amp;L total USD)</div><canvas id="chart-ticker-gain" height="250"></canvas></div>
+        <div class="col-md-6"><div class="section-title">Peores tickers (P&amp;L total USD)</div><canvas id="chart-ticker-loss" height="250"></canvas></div>
       </div>
     </div>
 
@@ -746,12 +783,12 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
             <th onclick="sortTable('gr-table',2)">Tipo</th>
             <th onclick="sortTable('gr-table',3)" class="text-end">Ops</th>
             <th onclick="sortTable('gr-table',4)" class="text-end">Cant. total</th>
-            <th onclick="sortTable('gr-table',5)" class="text-end">Imp.Compra</th>
-            <th onclick="sortTable('gr-table',6)" class="text-end">Imp.Venta</th>
-            <th onclick="sortTable('gr-table',7)" class="text-end">GR ARS</th>
-            <th onclick="sortTable('gr-table',8)" class="text-end">GR % ARS</th>
-            <th onclick="sortTable('gr-table',9)" class="text-end">GR USD</th>
-            <th onclick="sortTable('gr-table',10)" class="text-end">GR % USD</th>
+            <th onclick="sortTable('gr-table',5)" class="text-end">Imp.Compra USD</th>
+            <th onclick="sortTable('gr-table',6)" class="text-end">Imp.Venta USD</th>
+            <th onclick="sortTable('gr-table',7)" class="text-end">GR USD</th>
+            <th onclick="sortTable('gr-table',8)" class="text-end">GR % USD</th>
+            <th onclick="sortTable('gr-table',9)" class="text-end text-muted">GR ARS (ref.)</th>
+            <th onclick="sortTable('gr-table',10)" class="text-end text-muted">GR % ARS (ref.)</th>
           </tr></thead>
           <tbody id="gr-tbody"></tbody>
         </table>
@@ -844,20 +881,23 @@ function pnlBadge(v){const c=v>=0?'badge-gain':'badge-loss';return `<span class=
 
 // ── KPIs ───────────────────────────────────────────────────────────────────
 function renderKPIs(){
-  const totalValor  = DATA.reduce((s,d)=>s+(d.valor_ars||0),0);
-  const totalNeto   = DATA.reduce((s,d)=>s+(d.valor_neto||0),0);
-  const totalPnlARS = DATA.reduce((s,d)=>s+(d.pnl_ars||0),0);
-  const totalPnlUSD = DATA.reduce((s,d)=>s+(d.pnl_usd||0),0);
-  const totalCosto  = DATA.reduce((s,d)=>s+(d.costo_ars||0),0);
-  const pct = totalCosto ? totalPnlARS/totalCosto*100 : 0;
-  const gan = DATA.filter(d=>d.pnl_ars>0).length;
-  const per = DATA.filter(d=>d.pnl_ars<0).length;
+  // USD es la base de medición principal (costo/valor/P&L en dólares nativos
+  // de Cohen, no convertidos vía MEP) — ARS queda como referencia.
+  const totalValorUSD = DATA.reduce((s,d)=>s+(d.valor_usd||0),0);
+  const totalNetoUSD  = DATA.reduce((s,d)=>s+(d.valor_neto_usd||0),0);
+  const totalCostoUSD = DATA.reduce((s,d)=>s+(d.costo_usd||0),0);
+  const totalPnlUSD   = DATA.reduce((s,d)=>s+(d.pnl_usd||0),0);
+  const totalPnlARS   = DATA.reduce((s,d)=>s+(d.pnl_ars||0),0);
+  const pctUSD = totalCostoUSD ? totalPnlUSD/totalCostoUSD*100 : 0;
+  const gan = DATA.filter(d=>d.pnl_usd>0).length;
+  const per = DATA.filter(d=>d.pnl_usd<0).length;
   document.getElementById('kpis').innerHTML=[
-    {l:'Posiciones',    v:fmt(DATA.length),   s:`${gan} ganadoras / ${per} perdedoras`, color:'var(--gold)'},
-    {l:'Valor ARS',     v:'$ '+fmt(totalValor), s:'Precio mercado',                     color:'var(--gold)'},
-    {l:'Valor neto ARS',v:'$ '+fmt(totalNeto),  s:'Descontando 1.1% arancel',           color:'var(--gold)'},
-    {l:'P&L ARS',       v:'$ '+fmt(totalPnlARS),s:fmtPct(pct)+' sobre costo',          color:totalPnlARS>=0?'var(--ok)':'var(--bad)'},
-    {l:'P&L USD',       v:'U$S '+fmt(totalPnlUSD,2),s:'Al tipo MEP',                   color:totalPnlUSD>=0?'var(--ok)':'var(--bad)'},
+    {l:'Posiciones',            v:fmt(DATA.length),            s:`${gan} ganadoras / ${per} perdedoras`, color:'var(--gold)'},
+    {l:'Valor USD',             v:'U$S '+fmt(totalValorUSD,2), s:'Precio mercado',                       color:'var(--gold)'},
+    {l:'Valor neto USD',        v:'U$S '+fmt(totalNetoUSD,2),  s:'Descontando 1.1% arancel',             color:'var(--gold)'},
+    {l:'Capital invertido USD', v:'U$S '+fmt(totalCostoUSD,2), s:'Costo de posiciones abiertas',         color:'var(--gold)'},
+    {l:'P&L USD',               v:'U$S '+fmt(totalPnlUSD,2),   s:fmtPct(pctUSD)+' sobre costo USD',      color:totalPnlUSD>=0?'var(--ok)':'var(--bad)'},
+    {l:'P&L ARS (referencia)',  v:'$ '+fmt(totalPnlARS),       s:'Mismo cálculo, en pesos',               color:totalPnlARS>=0?'var(--ok)':'var(--bad)'},
   ].map(c=>`<div class="col-sm-6 col-xl"><div class="card kpi-card p-3">
     <div class="kpi-label">${c.l}</div>
     <div class="kpi-value mt-1" style="color:${c.color}">${c.v}</div>
@@ -876,8 +916,8 @@ function applyFilters(){
   let rows=DATA;
   if(cf.text) rows=rows.filter(d=>(d.cliente+d.ticker+d.nro_cuenta).toLowerCase().includes(cf.text));
   if(cf.tipo) rows=rows.filter(d=>d.tipo===cf.tipo);
-  if(cf.pnl==='gain') rows=rows.filter(d=>d.pnl_ars>0);
-  if(cf.pnl==='loss') rows=rows.filter(d=>d.pnl_ars<0);
+  if(cf.pnl==='gain') rows=rows.filter(d=>d.pnl_usd>0);
+  if(cf.pnl==='loss') rows=rows.filter(d=>d.pnl_usd<0);
   renderMainRows(rows);
 }
 function renderMainRows(rows){
@@ -888,14 +928,14 @@ function renderMainRows(rows){
       <td><strong>${d.ticker}</strong></td>
       <td><span class="badge bg-secondary">${d.tipo}</span></td>
       <td class="text-end">${fmt(d.cantidad,2)}</td>
-      <td class="text-end">${fmt(d.precio_ars,2)}</td>
-      <td class="text-end">${fmt(d.valor_ars,0)}</td>
-      <td class="text-end text-primary">${fmt(d.valor_neto,0)}</td>
-      <td class="text-end">${d.valor_neto_usd!=null?fmt(d.valor_neto_usd,0):'-'}</td>
-      <td class="text-end">${fmt(d.costo_ars,0)}</td>
-      <td class="text-end">${pnlBadge(d.pnl_pct_ars)}</td>
+      <td class="text-end">${fmt(d.precio_usd,2)}</td>
+      <td class="text-end">${fmt(d.valor_usd,2)}</td>
+      <td class="text-end text-primary">${fmt(d.valor_neto_usd,2)}</td>
+      <td class="text-end">${fmt(d.costo_usd,2)}</td>
       <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
       <td class="text-end">${pnlBadge(d.pnl_pct_usd)}</td>
+      <td class="text-end text-muted">${fmt(d.valor_ars,0)}</td>
+      <td class="text-end text-muted">${fmt(d.pnl_ars,0)}</td>
     </tr>`).join('');
   document.getElementById('count-label').textContent=`Mostrando ${rows.length} de ${DATA.length} posiciones`;
 }
@@ -955,36 +995,45 @@ function renderPerformance(){
   const desde = document.getElementById('perf-desde').value; // '' = Todo, sin piso de fecha
   const porCliente = {};
   const asegurar = (k, cliente) => {
-    if(!porCliente[k]) porCliente[k]={nro_cuenta:k, cliente, gr_ars:0, pnl_ars:0, costo_ars:0, valor_ars:0};
+    if(!porCliente[k]) porCliente[k]={
+      nro_cuenta:k, cliente, gr_usd:0, gr_ars:0, pnl_usd:0, pnl_ars:0,
+      costo_usd:0, costo_ars:0, valor_usd:0,
+    };
     return porCliente[k];
   };
   DATA.forEach(d=>{
     const p=asegurar(d.nro_cuenta, d.cliente);
+    p.pnl_usd += d.pnl_usd||0;
     p.pnl_ars += d.pnl_ars||0;
+    p.costo_usd += d.costo_usd||0;
     p.costo_ars += d.costo_ars||0;
-    p.valor_ars += d.valor_ars||0;
+    p.valor_usd += d.valor_usd||0;
   });
   DATA_GR.forEach(d=>{
     if(desde && d.fecha < desde) return;
     const p=asegurar(d.nro_cuenta, d.cliente);
+    p.gr_usd += d.gr_usd||0;
     p.gr_ars += d.gr_ars||0;
   });
   const rows = Object.values(porCliente).map(p=>{
+    const resultado_total_usd = p.gr_usd + p.pnl_usd;
     const resultado_total_ars = p.gr_ars + p.pnl_ars;
-    const performance_pct = p.costo_ars ? resultado_total_ars/p.costo_ars*100 : null;
-    return {...p, resultado_total_ars, performance_pct};
-  }).sort((a,b)=>b.resultado_total_ars-a.resultado_total_ars);
+    const performance_pct = p.costo_usd ? resultado_total_usd/p.costo_usd*100 : null;
+    return {...p, resultado_total_usd, resultado_total_ars, performance_pct};
+  }).sort((a,b)=>b.resultado_total_usd-a.resultado_total_usd);
 
   document.getElementById('tbody-performance').innerHTML = rows.map(p=>`
     <tr>
       <td><strong>${p.nro_cuenta}</strong></td>
       <td>${p.cliente}</td>
-      <td class="text-end ${cls(p.gr_ars)}">${fmt(p.gr_ars)}</td>
-      <td class="text-end ${cls(p.pnl_ars)}">${fmt(p.pnl_ars)}</td>
-      <td class="text-end ${cls(p.resultado_total_ars)}">${fmt(p.resultado_total_ars)}</td>
-      <td class="text-end">${fmt(p.costo_ars)}</td>
-      <td class="text-end text-primary">${fmt(p.valor_ars)}</td>
+      <td class="text-end ${cls(p.gr_usd)}">${fmt(p.gr_usd,2)}</td>
+      <td class="text-end ${cls(p.pnl_usd)}">${fmt(p.pnl_usd,2)}</td>
+      <td class="text-end ${cls(p.resultado_total_usd)}">${fmt(p.resultado_total_usd,2)}</td>
+      <td class="text-end">${fmt(p.costo_usd,2)}</td>
+      <td class="text-end text-primary">${fmt(p.valor_usd,2)}</td>
       <td class="text-end">${p.performance_pct!=null?pnlBadge(p.performance_pct):'—'}</td>
+      <td class="text-end text-muted">${fmt(p.resultado_total_ars)}</td>
+      <td class="text-end text-muted">${fmt(p.costo_ars)}</td>
     </tr>`).join('');
   document.getElementById('performance-count').textContent =
     `${rows.length} clientes — ganancia realizada ${desde?('desde '+desde):'de todo el histórico disponible'}, P&L no realizado siempre actual`;
@@ -1037,33 +1086,34 @@ function buildClienteTab(){
 }
 function renderCliente(nro){
   const rows=DATA.filter(d=>d.nro_cuenta===nro);
-  const tv=rows.reduce((s,d)=>s+(d.valor_ars||0),0);
-  const tn=rows.reduce((s,d)=>s+(d.valor_neto||0),0);
+  const tvUSD=rows.reduce((s,d)=>s+(d.valor_usd||0),0);
+  const tnUSD=rows.reduce((s,d)=>s+(d.valor_neto_usd||0),0);
+  const tcUSD=rows.reduce((s,d)=>s+(d.costo_usd||0),0);
+  const tuUSD=rows.reduce((s,d)=>s+(d.pnl_usd||0),0);
   const tp=rows.reduce((s,d)=>s+(d.pnl_ars||0),0);
-  const tu=rows.reduce((s,d)=>s+(d.pnl_usd||0),0);
-  const tc=rows.reduce((s,d)=>s+(d.costo_ars||0),0);
-  const pct=tc?tp/tc*100:0;
+  const pctUSD=tcUSD?tuUSD/tcUSD*100:0;
   document.getElementById('kpis-cliente').innerHTML=`
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Posiciones</div><div class="kpi-value">${rows.length}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor ARS</div><div class="kpi-value text-primary">$ ${fmt(tv)}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor neto ARS</div><div class="kpi-value text-info">$ ${fmt(tn)}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div><div style="font-size:.68rem;color:var(--mu)">${fmtPct(pct)}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L USD</div><div class="kpi-value ${cls(tu)}">U$S ${fmt(tu,2)}</div></div></div>`;
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor USD</div><div class="kpi-value text-primary">U$S ${fmt(tvUSD,2)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor neto USD</div><div class="kpi-value text-info">U$S ${fmt(tnUSD,2)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Capital invertido USD</div><div class="kpi-value">U$S ${fmt(tcUSD,2)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L USD</div><div class="kpi-value ${cls(tuUSD)}">U$S ${fmt(tuUSD,2)}</div><div style="font-size:.68rem;color:var(--mu)">${fmtPct(pctUSD)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS (ref.)</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div></div></div>`;
   document.getElementById('tbody-cliente').innerHTML=
-    [...rows].sort((a,b)=>(b.valor_ars||0)-(a.valor_ars||0)).map(d=>`
+    [...rows].sort((a,b)=>(b.valor_usd||0)-(a.valor_usd||0)).map(d=>`
     <tr>
       <td><strong>${d.ticker}</strong></td>
       <td class="text-muted">${d.descripcion.substring(0,32)}</td>
       <td><span class="badge bg-secondary">${d.tipo}</span></td>
       <td class="text-end">${fmt(d.cantidad,2)}</td>
-      <td class="text-end">${fmt(d.precio_ars,2)}</td>
-      <td class="text-end">${fmt(d.valor_ars,0)}</td>
-      <td class="text-end text-primary">${fmt(d.valor_neto,0)}</td>
-      <td class="text-end">${d.valor_neto_usd!=null?fmt(d.valor_neto_usd,0):'-'}</td>
-      <td class="text-end">${fmt(d.costo_ars,0)}</td>
-      <td class="text-end">${pnlBadge(d.pnl_pct_ars)}</td>
+      <td class="text-end">${fmt(d.precio_usd,2)}</td>
+      <td class="text-end">${fmt(d.valor_usd,2)}</td>
+      <td class="text-end text-primary">${fmt(d.valor_neto_usd,2)}</td>
+      <td class="text-end">${fmt(d.costo_usd,2)}</td>
       <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
       <td class="text-end">${pnlBadge(d.pnl_pct_usd)}</td>
+      <td class="text-end text-muted">${fmt(d.valor_ars,0)}</td>
+      <td class="text-end text-muted">${fmt(d.pnl_ars,0)}</td>
     </tr>`).join('');
 }
 
@@ -1076,35 +1126,36 @@ function buildTickerTab(){
 }
 function renderTicker(ticker){
   const rows=DATA.filter(d=>d.ticker===ticker);
-  const tv  =rows.reduce((s,d)=>s+(d.valor_ars||0),0);
-  const tn  =rows.reduce((s,d)=>s+(d.valor_neto||0),0);
-  const tp  =rows.reduce((s,d)=>s+(d.pnl_ars||0),0);
-  const tu  =rows.reduce((s,d)=>s+(d.pnl_usd||0),0);
-  const tc  =rows.reduce((s,d)=>s+(d.costo_ars||0),0);
-  const cant=rows.reduce((s,d)=>s+(d.cantidad||0),0);
-  const pct =tc?tp/tc*100:0;
-  const precio=rows[0]?.precio_ars||0;
+  const tvUSD=rows.reduce((s,d)=>s+(d.valor_usd||0),0);
+  const tnUSD=rows.reduce((s,d)=>s+(d.valor_neto_usd||0),0);
+  const tcUSD=rows.reduce((s,d)=>s+(d.costo_usd||0),0);
+  const tuUSD=rows.reduce((s,d)=>s+(d.pnl_usd||0),0);
+  const tp   =rows.reduce((s,d)=>s+(d.pnl_ars||0),0);
+  const cant =rows.reduce((s,d)=>s+(d.cantidad||0),0);
+  const pctUSD=tcUSD?tuUSD/tcUSD*100:0;
+  const precioUSD=rows[0]?.precio_usd||0;
   document.getElementById('kpis-ticker').innerHTML=`
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Clientes</div><div class="kpi-value">${rows.length}</div></div></div>
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Cantidad total</div><div class="kpi-value">${fmt(cant,2)}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Precio ARS</div><div class="kpi-value text-primary">$ ${fmt(precio,2)}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor total</div><div class="kpi-value">$ ${fmt(tv)}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor neto</div><div class="kpi-value text-info">$ ${fmt(tn)}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div><div style="font-size:.68rem;color:var(--mu)">${fmtPct(pct)}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L USD</div><div class="kpi-value ${cls(tu)}">U$S ${fmt(tu,2)}</div></div></div>`;
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Precio USD</div><div class="kpi-value text-primary">U$S ${fmt(precioUSD,2)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor total USD</div><div class="kpi-value">U$S ${fmt(tvUSD,2)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Valor neto USD</div><div class="kpi-value text-info">U$S ${fmt(tnUSD,2)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Capital invertido USD</div><div class="kpi-value">U$S ${fmt(tcUSD,2)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L USD</div><div class="kpi-value ${cls(tuUSD)}">U$S ${fmt(tuUSD,2)}</div><div style="font-size:.68rem;color:var(--mu)">${fmtPct(pctUSD)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS (ref.)</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div></div></div>`;
   document.getElementById('tbody-ticker').innerHTML=
     [...rows].sort((a,b)=>(b.pnl_usd||0)-(a.pnl_usd||0)).map(d=>`
     <tr>
       <td>${d.nro_cuenta}</td><td>${d.cliente.substring(0,28)}</td>
       <td class="text-end">${fmt(d.cantidad,2)}</td>
-      <td class="text-end">${fmt(d.precio_ars,2)}</td>
-      <td class="text-end">${fmt(d.valor_ars,0)}</td>
-      <td class="text-end text-primary">${fmt(d.valor_neto,0)}</td>
-      <td class="text-end">${d.valor_neto_usd!=null?fmt(d.valor_neto_usd,0):'-'}</td>
-      <td class="text-end">${fmt(d.costo_ars,0)}</td>
-      <td class="text-end">${pnlBadge(d.pnl_pct_ars)}</td>
+      <td class="text-end">${fmt(d.precio_usd,2)}</td>
+      <td class="text-end">${fmt(d.valor_usd,2)}</td>
+      <td class="text-end text-primary">${fmt(d.valor_neto_usd,2)}</td>
+      <td class="text-end">${fmt(d.costo_usd,2)}</td>
       <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
       <td class="text-end">${pnlBadge(d.pnl_pct_usd)}</td>
+      <td class="text-end text-muted">${fmt(d.valor_ars,0)}</td>
+      <td class="text-end text-muted">${fmt(d.pnl_ars,0)}</td>
     </tr>`).join('');
 }
 
@@ -1113,18 +1164,18 @@ function buildCharts(){
   const gridColor='rgba(122,143,181,.15)', textColor='#7a8fb5';
   Chart.defaults.color=textColor;
   Chart.defaults.borderColor=gridColor;
-  const sorted=[...DATA].sort((a,b)=>b.pnl_ars-a.pnl_ars);
+  const sorted=[...DATA].sort((a,b)=>b.pnl_usd-a.pnl_usd);
   const makeBar=(id,rows,color)=>new Chart(document.getElementById(id),{type:'bar',
-    data:{labels:rows.map(d=>`${d.ticker}(${d.nro_cuenta})`),datasets:[{data:rows.map(d=>Math.abs(d.pnl_ars)),backgroundColor:color,borderRadius:4}]},
-    options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{grid:{color:gridColor},ticks:{color:textColor,callback:v=>'$'+fmt(v)}},y:{grid:{color:gridColor},ticks:{color:textColor}}}}});
+    data:{labels:rows.map(d=>`${d.ticker}(${d.nro_cuenta})`),datasets:[{data:rows.map(d=>Math.abs(d.pnl_usd)),backgroundColor:color,borderRadius:4}]},
+    options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{grid:{color:gridColor},ticks:{color:textColor,callback:v=>'U$S '+fmt(v)}},y:{grid:{color:gridColor},ticks:{color:textColor}}}}});
   makeBar('chart-gainers',sorted.slice(0,10),'#2e9e6b');
   makeBar('chart-losers',sorted.slice(-10).reverse(),'#c4453f');
   const tkMap={};
-  DATA.forEach(d=>{if(!tkMap[d.ticker])tkMap[d.ticker]={pnl:0,n:0};tkMap[d.ticker].pnl+=d.pnl_ars||0;tkMap[d.ticker].n++;});
+  DATA.forEach(d=>{if(!tkMap[d.ticker])tkMap[d.ticker]={pnl:0,n:0};tkMap[d.ticker].pnl+=d.pnl_usd||0;tkMap[d.ticker].n++;});
   const tkArr=Object.entries(tkMap).sort((a,b)=>b[1].pnl-a[1].pnl);
   const makeBar2=(id,rows,color)=>new Chart(document.getElementById(id),{type:'bar',
     data:{labels:rows.map(([t,v])=>`${t}(${v.n}cl)`),datasets:[{data:rows.map(([,v])=>Math.abs(v.pnl)),backgroundColor:color,borderRadius:4}]},
-    options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{ticks:{callback:v=>'$'+fmt(v)}}}}});
+    options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{ticks:{callback:v=>'U$S '+fmt(v)}}}}});
   makeBar2('chart-ticker-gain',tkArr.slice(0,10),'#C9A84C');
   makeBar2('chart-ticker-loss',tkArr.slice(-10).reverse(),'#c98a1c');
 }
@@ -1133,8 +1184,8 @@ function buildCharts(){
 function buildHeatmap(){
   const cm={},tm={};
   DATA.forEach(d=>{
-    if(!cm[d.nro_cuenta])cm[d.nro_cuenta]={n:d.cliente,v:0};cm[d.nro_cuenta].v+=d.valor_ars||0;
-    if(!tm[d.ticker])tm[d.ticker]={v:0};tm[d.ticker].v+=d.valor_ars||0;
+    if(!cm[d.nro_cuenta])cm[d.nro_cuenta]={n:d.cliente,v:0};cm[d.nro_cuenta].v+=d.valor_usd||0;
+    if(!tm[d.ticker])tm[d.ticker]={v:0};tm[d.ticker].v+=d.valor_usd||0;
   });
   const clientes=Object.keys(cm).sort((a,b)=>cm[b].v-cm[a].v);
   const tickers=Object.keys(tm).sort((a,b)=>tm[b].v-tm[a].v).slice(0,40);
@@ -1157,20 +1208,23 @@ function agruparGR(rows){
     const k=`${d.nro_cuenta}|${d.ticker}`;
     if(!map[k]) map[k]={
       nro_cuenta:d.nro_cuenta, cliente:d.cliente, ticker:d.ticker, tipo:d.tipo,
-      ops:0, cantidad:0, importe_compra:0, importe_venta:0, gr_ars:0, gr_usd:0
+      ops:0, cantidad:0, importe_compra_ars:0, importe_venta_ars:0,
+      importe_compra_usd:0, importe_venta_usd:0, gr_ars:0, gr_usd:0
     };
     const g=map[k];
     g.ops++;
-    g.cantidad       += d.cantidad||0;
-    g.importe_compra += d.importe_compra_ars||0;
-    g.importe_venta  += d.importe_venta_ars||0;
-    g.gr_ars         += d.gr_ars||0;
-    g.gr_usd         += d.gr_usd||0;
+    g.cantidad           += d.cantidad||0;
+    g.importe_compra_ars += d.importe_compra_ars||0;
+    g.importe_venta_ars  += d.importe_venta_ars||0;
+    g.importe_compra_usd += d.importe_compra_usd||0;
+    g.importe_venta_usd  += d.importe_venta_usd||0;
+    g.gr_ars              += d.gr_ars||0;
+    g.gr_usd               += d.gr_usd||0;
   });
   return Object.values(map).map(g=>({
     ...g,
-    gr_pct_ars: g.importe_compra ? g.gr_ars/g.importe_compra*100 : 0,
-    gr_pct_usd: g.importe_compra ? g.gr_usd/(g.importe_compra/MEP)*100 : 0,
+    gr_pct_ars: g.importe_compra_ars ? g.gr_ars/g.importe_compra_ars*100 : 0,
+    gr_pct_usd: g.importe_compra_usd ? g.gr_usd/g.importe_compra_usd*100 : 0,
   }));
 }
 
@@ -1187,8 +1241,8 @@ function filterGRPnl(m){grFilter.pnl=m;renderGR();}
 function renderGR(){
   let raw=DATA_GR;
   if(grFilter.text)raw=raw.filter(d=>(d.cliente+d.ticker+d.nro_cuenta).toLowerCase().includes(grFilter.text));
-  if(grFilter.pnl==='gain')raw=raw.filter(d=>d.gr_ars>0);
-  if(grFilter.pnl==='loss')raw=raw.filter(d=>d.gr_ars<0);
+  if(grFilter.pnl==='gain')raw=raw.filter(d=>d.gr_usd>0);
+  if(grFilter.pnl==='loss')raw=raw.filter(d=>d.gr_usd<0);
 
   const rows=agruparGR(raw).sort((a,b)=>b.gr_usd-a.gr_usd);
 
@@ -1198,8 +1252,8 @@ function renderGR(){
   document.getElementById('gr-kpis').innerHTML=`
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Posiciones</div><div class="kpi-value">${rows.length}</div></div></div>
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">Operaciones</div><div class="kpi-value">${tops}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">GR ARS</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div></div></div>
-    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">GR USD</div><div class="kpi-value ${cls(tu)}">U$S ${fmt(tu,2)}</div></div></div>`;
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">GR USD</div><div class="kpi-value ${cls(tu)}">U$S ${fmt(tu,2)}</div></div></div>
+    <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">GR ARS (ref.)</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div></div></div>`;
 
   document.getElementById('gr-tbody').innerHTML=rows.map(d=>`
     <tr>
@@ -1208,12 +1262,12 @@ function renderGR(){
       <td><span class="badge bg-secondary">${d.tipo}</span></td>
       <td class="text-end">${d.ops}</td>
       <td class="text-end">${fmt(d.cantidad,2)}</td>
-      <td class="text-end">${fmt(d.importe_compra,0)}</td>
-      <td class="text-end">${fmt(d.importe_venta,0)}</td>
-      <td class="text-end ${cls(d.gr_ars)}">${fmt(d.gr_ars,0)}</td>
-      <td class="text-end">${pnlBadge(d.gr_pct_ars)}</td>
+      <td class="text-end">${fmt(d.importe_compra_usd,2)}</td>
+      <td class="text-end">${fmt(d.importe_venta_usd,2)}</td>
       <td class="text-end ${cls(d.gr_usd)}">${fmt(d.gr_usd,2)}</td>
       <td class="text-end">${pnlBadge(d.gr_pct_usd)}</td>
+      <td class="text-end text-muted">${fmt(d.gr_ars,0)}</td>
+      <td class="text-end text-muted">${pnlBadge(d.gr_pct_ars)}</td>
     </tr>`).join('');
   document.getElementById('gr-count').textContent=
     `${rows.length} posiciones (${tops} operaciones) — filtrado de ${agruparGR(DATA_GR).length} total`;
