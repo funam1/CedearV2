@@ -6,9 +6,18 @@
 # diarios de:
 #   - Alpaca Market Data (primario, EEUU — Cedear directo + Acciones vía
 #     ADR mapeado). Free tier generoso (200 req/min), sin cola necesaria.
+#     Se pide con adjustment=all (splits + dividendos) — sin esto el día
+#     ex-dividendo se ve como una caída de precio real y distorsiona la
+#     volatilidad calculada.
 #   - Alpha Vantage (fallback secundario, sólo si Alpaca no encuentra el
 #     símbolo). Free tier muy limitado (25 req/día) — no cubre BCBA
-#     (confirmado en vivo), así que en la práctica se usa poco o nada.
+#     (confirmado en vivo), así que en la práctica se usa poco o nada. Sus
+#     precios NO vienen ajustados por dividendos (el endpoint ajustado es
+#     premium/pago) — limitación conocida, sin arreglo gratuito disponible.
+#
+# Volatilidad: log-retornos (ln(P_t/P_t-1)), no retornos simples — es lo
+# correcto para anualizar la volatilidad de un proceso geométrico, y se usa
+# la misma serie para la matriz de correlación por consistencia.
 #
 # Se ejecuta siempre a demanda (nunca en el loop de auto-refresh de la app),
 # cacheado por ticker en memoria de proceso + un archivo local
@@ -24,8 +33,10 @@ from pathlib import Path
 import requests
 
 try:
+    import numpy as np
     import pandas as pd
 except ImportError:  # pragma: no cover
+    np = None
     pd = None
 
 _DIR = Path(__file__).parent
@@ -121,7 +132,12 @@ def fetch_precios_alpaca(simbolo: str, n_dias: int, api_key: str, api_secret: st
     try:
         resp = requests.get(
             f"{ALPACA_BASE}/v2/stocks/{simbolo}/bars",
-            params={"timeframe": "1Day", "start": desde, "limit": 1000, "feed": "iex"},
+            params={
+                "timeframe": "1Day", "start": desde, "limit": 1000, "feed": "iex",
+                # sin esto Alpaca trae precios "raw": el día ex-dividendo se ve
+                # como una caída de precio real y distorsiona la volatilidad.
+                "adjustment": "all",
+            },
             headers={"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": api_secret},
             timeout=15,
         )
@@ -227,14 +243,17 @@ def calcular_vol_corr(posiciones: list, n_dias: int, top_n: int,
     _guardar_cache(_CACHE)
 
     fecha_calculo = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    if pd is None or not series:
+    if pd is None or np is None or not series:
         return {
             "vol": [], "corr_tickers": [], "corr_matrix": [],
             "sin_cobertura": sorted(set(sin_cobertura)), "fecha_calculo": fecha_calculo,
         }
 
     df = pd.DataFrame({t: {p["fecha"]: p["close"] for p in precios} for t, precios in series.items()}).sort_index()
-    retornos = df.pct_change().dropna(how="all")
+    # Log-retornos (ln(P_t/P_t-1)) en vez de retornos simples: es lo correcto
+    # para anualizar volatilidad de un proceso geométrico (y para la matriz
+    # de correlación, por consistencia).
+    retornos = np.log(df / df.shift(1)).dropna(how="all")
 
     vol = []
     for t in df.columns:
