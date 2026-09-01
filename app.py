@@ -19,7 +19,9 @@ import mercado
 
 COHEN_BASE = "https://connect.cohen.com.ar"
 TIPOS_GNR = {"Acciones", "Cedear"}
-ARANCEL = 0.989  # 1 - 1.1% comisión al vender
+ARANCEL_PCT = 0.0121  # 1.21% arancel de Cohen, aplica a compra y venta
+ARANCEL_VENTA = 1 - ARANCEL_PCT  # descuenta el arancel del precio de venta
+ARANCEL_COMPRA = 1 + ARANCEL_PCT  # suma el arancel al costo de compra
 INTERVAL_S = 30 * 60  # 30 minutos
 
 EMAILS_AUTORIZADOS = [
@@ -184,23 +186,40 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                 valor_ars = float(
                     r.get("saldoValorizadoARS") or r.get("saldoValorizado") or 0
                 )
-                valor_neto = round(valor_ars * ARANCEL, 2)
-                costo_usd = float(r.get("costoTotalUSD") or 0)
-                pnl_usd = float(r.get("rendimientoUSD") or 0)
+                valor_neto = round(valor_ars * ARANCEL_VENTA, 2)
+                # Cohen informa el costo de compra bruto, sin el arancel que
+                # realmente se pagó al comprar — se lo sumamos acá para que
+                # el costo (y por lo tanto el P&L) refleje lo efectivamente
+                # invertido.
+                costo_ars_bruto = float(r.get("costoTotalARS") or 0)
+                costo_usd_bruto = float(r.get("costoTotalUSD") or 0)
+                costo_ars = round(costo_ars_bruto * ARANCEL_COMPRA, 2)
+                costo_usd = round(costo_usd_bruto * ARANCEL_COMPRA, 2)
                 # saldoValorizadoUSD viene nativo de Cohen — más preciso que
                 # convertir valor_ars con el MEP de hoy (evita una doble
                 # conversión y usa el mismo dólar que ya usa Cohen internamente
                 # para costoTotalUSD/rendimientoUSD). Pero a veces Cohen lo
                 # devuelve en 0/null puntualmente aunque costoTotalUSD y
                 # rendimientoUSD sí vengan bien — en ese caso lo reconstruimos
-                # con esos dos (costo + P&L), que sí son confiables.
+                # con esos dos (costo bruto + P&L bruto de Cohen, sin arancel),
+                # que sí son confiables.
+                pnl_usd_bruto = float(r.get("rendimientoUSD") or 0)
                 valor_usd_raw = r.get("saldoValorizadoUSD")
                 valor_usd = (
                     round(float(valor_usd_raw), 2)
                     if valor_usd_raw
-                    else round(costo_usd + pnl_usd, 2)
+                    else round(costo_usd_bruto + pnl_usd_bruto, 2)
                 )
-                valor_neto_usd = round(valor_usd * ARANCEL, 2)
+                valor_neto_usd = round(valor_usd * ARANCEL_VENTA, 2)
+                # P&L neto: se calcula sobre el valor ya descontado el arancel
+                # de venta (valor_neto/valor_neto_usd) contra el costo de
+                # compra ya con su arancel sumado, en vez de tomar el
+                # rendimiento bruto que informa Cohen (que no contempla
+                # ninguno de los dos aranceles).
+                pnl_ars = round(valor_neto - costo_ars, 2)
+                pnl_pct_ars = round(pnl_ars / costo_ars * 100, 2) if costo_ars else 0.0
+                pnl_usd = round(valor_neto_usd - costo_usd, 2)
+                pnl_pct_usd = round(pnl_usd / costo_usd * 100, 2) if costo_usd else 0.0
                 posiciones.append(
                     {
                         "id_comitente": id_com,
@@ -220,12 +239,12 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                         "valor_neto": valor_neto,
                         "valor_usd": valor_usd,
                         "valor_neto_usd": valor_neto_usd,
-                        "costo_ars": float(r.get("costoTotalARS") or 0),
+                        "costo_ars": costo_ars,
                         "costo_usd": costo_usd,
-                        "pnl_ars": float(r.get("rendimientoARS") or 0),
-                        "pnl_pct_ars": float(r.get("rendimientoPctARS") or 0),
+                        "pnl_ars": pnl_ars,
+                        "pnl_pct_ars": pnl_pct_ars,
                         "pnl_usd": pnl_usd,
-                        "pnl_pct_usd": float(r.get("rendimientoPctUSD") or 0),
+                        "pnl_pct_usd": pnl_pct_usd,
                         "var_dia_ars": float(r.get("varDiariaARS") or 0),
                         "var_dia_pct": float(r.get("varDiariaPctARS") or 0),
                         "fecha": r.get("fechaCotizacionString") or "",
