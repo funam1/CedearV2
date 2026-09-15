@@ -333,6 +333,7 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                 posiciones.append(
                     {
                         "id_comitente": id_com,
+                        "id_instrumento": r.get("idInstrumento"),
                         "nro_cuenta": nro,
                         "cliente": nombre,
                         "ticker": r.get("ticker") or r.get("instrumentoSimbolo", ""),
@@ -944,6 +945,19 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
   </div><!-- tab-content -->
 </div><!-- container -->
 
+<!-- ── MODAL DETALLE DE POSICIÓN (última compra / ventas / TNA) ── -->
+<div class="modal fade" id="modalDetallePosicion" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="detallePosicionTitulo">Detalle de la posición</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="detallePosicionBody"></div>
+    </div>
+  </div>
+</div>
+
 <!-- ── MODAL ORDEN WHATSAPP ── -->
 <div class="modal fade" id="modalOrden" tabindex="-1">
   <div class="modal-dialog modal-lg">
@@ -1002,6 +1016,7 @@ const DATA    = __DATA_JSON__;
 const DATA_GR = __DATA_GR_JSON__;
 const MEP     = __MEP__;
 const MERCADO = __MERCADO_JSON__;
+const DETALLE_BOLETA = __DETALLE_BOLETA_JSON__;
 
 // ── Utils ──────────────────────────────────────────────────────────────────
 const fmt    = (v,d=0) => v==null?'':Number(v).toLocaleString('es-AR',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -1231,7 +1246,7 @@ function renderCliente(nro){
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS (ref.)</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div></div></div>`;
   document.getElementById('tbody-cliente').innerHTML=
     [...rows].sort((a,b)=>(b.valor_usd||0)-(a.valor_usd||0)).map(d=>`
-    <tr>
+    <tr${d.id_instrumento?` style="cursor:pointer" title="Ver última compra / TNA" onclick="verDetallePosicion(${d.id_comitente},${d.id_instrumento})"`:''}>
       <td><strong>${d.ticker}</strong></td>
       <td class="text-muted">${d.descripcion.substring(0,32)}</td>
       <td><span class="badge bg-secondary">${d.tipo}</span></td>
@@ -1245,6 +1260,68 @@ function renderCliente(nro){
       <td class="text-end text-muted">${fmt(d.valor_ars,0)}</td>
       <td class="text-end text-muted">${fmt(d.pnl_ars,0)}</td>
     </tr>`).join('');
+}
+
+// Click en una fila de "Por cliente": pide a Cohen el historial de boletos de
+// esa cuenta+instrumento. La tabla vive en el iframe embebido y no puede
+// llamar a Python directamente, así que navega la ventana padre (mismo
+// patrón que el botón de actualización forzada del navbar) — el backend
+// resuelve la consulta y reabre esta misma vista con el detalle ya armado.
+function verDetallePosicion(idComitente, idInstrumento){
+  window.parent.location.href = '/?detalle_boleta=' + idComitente + ':' + idInstrumento;
+}
+
+function fmtFechaCorta(iso){
+  if(!iso) return '';
+  const f = new Date(iso);
+  if(isNaN(f)) return iso;
+  return f.toLocaleDateString('es-AR');
+}
+
+function mostrarDetalleBoletaSiCorresponde(){
+  if(!DETALLE_BOLETA || DETALLE_BOLETA.error) return;
+  const fila = DATA.find(d=>d.id_comitente===DETALLE_BOLETA.id_comitente && d.id_instrumento===DETALLE_BOLETA.id_instrumento);
+  const boletos = (DETALLE_BOLETA.boletos||[])
+    .slice()
+    .sort((a,b)=>new Date(a.fechaConcertacion)-new Date(b.fechaConcertacion));
+  const compras = boletos.filter(b=>b.tipoDeOperacion==='Compra');
+  if(!compras.length){
+    document.getElementById('detallePosicionTitulo').textContent = fila ? `${fila.ticker} — ${fila.nro_cuenta}` : 'Detalle de la posición';
+    document.getElementById('detallePosicionBody').innerHTML = '<p class="text-muted mb-0">No se encontraron boletos de compra para esta posición en el rango consultado.</p>';
+    new bootstrap.Modal(document.getElementById('modalDetallePosicion')).show();
+    return;
+  }
+  const ultimaCompra = compras[compras.length-1];
+  const ventasPosteriores = boletos.filter(b=>b.tipoDeOperacion==='Venta' && new Date(b.fechaConcertacion) > new Date(ultimaCompra.fechaConcertacion));
+  const dias = Math.max(1, Math.round((new Date() - new Date(ultimaCompra.fechaConcertacion)) / 86400000));
+  const precioUnitario = ultimaCompra.cantidadDelBoleto ? ultimaCompra.importeNeto/ultimaCompra.cantidadDelBoleto : null;
+  const tna = (fila && fila.pnl_pct_usd!=null) ? fila.pnl_pct_usd/dias*365 : null;
+
+  let html = `<div class="mb-2"><strong>Última compra:</strong> ${fmtFechaCorta(ultimaCompra.fechaConcertacion)}`
+    + ` — ${fmt(ultimaCompra.cantidadDelBoleto,2)} u. a ${precioUnitario!=null?fmt(precioUnitario,2):'-'} ${ultimaCompra.moneda||''} c/u`
+    + ` (neto: ${fmt(ultimaCompra.importeNeto,2)} ${ultimaCompra.moneda||''})</div>`;
+  html += `<div class="mb-2"><strong>Días desde la compra:</strong> ${dias}</div>`;
+  if(ventasPosteriores.length){
+    html += `<div class="mb-2"><strong>Ventas parciales posteriores:</strong><ul class="mb-0">`
+      + ventasPosteriores.map(v=>`<li>${fmtFechaCorta(v.fechaConcertacion)} — ${fmt(v.cantidadDelBoleto,2)} u.</li>`).join('')
+      + `</ul></div>`;
+  } else {
+    html += `<div class="mb-2 text-muted">Sin ventas parciales posteriores a esta compra.</div>`;
+  }
+  if(tna!=null){
+    html += `<div class="mb-0"><strong>TNA estimada (sobre la posición actual):</strong> <span class="${cls(tna)}">${fmtPct(tna)}</span>`
+      + `<div class="text-muted" style="font-size:.68rem">P&amp;L % USD actual (${fmtPct(fila.pnl_pct_usd)}) anualizado sobre ${dias} días — no es TIR, es una tasa simple.</div></div>`;
+  }
+  document.getElementById('detallePosicionTitulo').textContent = fila ? `${fila.ticker} — ${fila.nro_cuenta}` : 'Detalle de la posición';
+  document.getElementById('detallePosicionBody').innerHTML = html;
+
+  const tabClienteLink = document.querySelector('a[href="#tab-cliente"]');
+  if(fila && tabClienteLink){
+    new bootstrap.Tab(tabClienteLink).show();
+    document.getElementById('search-cliente-input').value = `${fila.nro_cuenta} - ${fila.cliente}`;
+    renderCliente(fila.nro_cuenta);
+  }
+  new bootstrap.Modal(document.getElementById('modalDetallePosicion')).show();
 }
 
 // ── Por ticker ─────────────────────────────────────────────────────────────
@@ -1571,6 +1648,7 @@ buildCharts();
 buildHeatmap();
 buildGR();
 renderAlertas();
+mostrarDetalleBoletaSiCorresponde();
 </script>
 </body>
 </html>"""
@@ -1582,7 +1660,7 @@ def _js_safe(data) -> str:
 
 def generar_html(
     posiciones: list, gr: list, mep: float, ts: str, user_name: str = "",
-    mercado_result: dict | None = None,
+    mercado_result: dict | None = None, detalle_boleta: dict | None = None,
 ) -> str:
     return (
         HTML_TEMPLATE.replace("__DATA_JSON__", _js_safe(posiciones))
@@ -1593,6 +1671,7 @@ def generar_html(
         .replace("__INTERVAL_S__", str(INTERVAL_S))
         .replace("__USER_NAME__", user_name)
         .replace("__MERCADO_JSON__", _js_safe(mercado_result))
+        .replace("__DETALLE_BOLETA_JSON__", _js_safe(detalle_boleta))
     )
 
 
@@ -1796,10 +1875,35 @@ if pagina == "CEDEAR / GNR":
             finally:
                 progress_bar.empty()
 
+    # Detalle de "última compra + ventas parciales" de una posición puntual:
+    # se pide al hacer click en una fila de "Por cliente" — el navbar/tabla
+    # vive en el iframe embebido, así que (igual que force_refresh) el click
+    # navega la ventana padre con esta query y acá se resuelve con una
+    # consulta puntual y rápida a boletos/list (no se precalcula para todas
+    # las posiciones porque sería cientos de llamadas extra en cada refresco).
+    detalle_boleta = None
+    bq = st.query_params.get("detalle_boleta")
+    if bq and ":" in bq:
+        try:
+            id_com_str, id_instr_str = bq.split(":", 1)
+            id_com_dtl, id_instr_dtl = int(id_com_str), int(id_instr_str)
+            token_dtl = obtener_token()
+            boletos_dtl = get_boletos(id_com_dtl, id_instr_dtl, token_dtl)
+            detalle_boleta = {
+                "id_comitente": id_com_dtl,
+                "id_instrumento": id_instr_dtl,
+                "boletos": boletos_dtl,
+            }
+        except Exception:
+            detalle_boleta = {"error": True}
+        st.query_params.clear()
+
     # Último resultado calculado por CUALQUIER usuario en este proceso (no
     # session_state) — así todos ven el mismo cálculo sin tener que pedirlo
     # cada uno por su lado.
-    html_content = generar_html(gnr, gr, mep, ts, user_name, mercado.obtener_ultimo_resultado())
+    html_content = generar_html(
+        gnr, gr, mep, ts, user_name, mercado.obtener_ultimo_resultado(), detalle_boleta
+    )
     st.components.v1.html(html_content, height=900, scrolling=True)
 
 # ── Transferencias ───────────────────────────────────────────────────────────
