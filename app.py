@@ -19,7 +19,10 @@ import mercado
 
 COHEN_BASE = "https://connect.cohen.com.ar"
 TIPOS_GNR = {"Acciones", "Cedear"}
-ARANCEL_PCT = 0.0121  # 1.21% arancel de Cohen, aplica a compra y venta
+ARANCEL_PCT = 0.0127  # 1.27% arancel de Cohen, aplica a compra y venta (medido
+# sobre boletos reales de Compra/Venta de Cedear/Acciones vía api/boletos/list:
+# ~92% de las operaciones caen entre 1.27%-1.31%, mediana exacta en 1.27%. No
+# existe un endpoint de arancel por cliente en la API — se aplica parejo.
 ARANCEL_VENTA = 1 - ARANCEL_PCT  # descuenta el arancel del precio de venta
 ARANCEL_COMPRA = 1 + ARANCEL_PCT  # suma el arancel al costo de compra
 INTERVAL_S = 30 * 60  # 30 minutos
@@ -57,8 +60,11 @@ def obtener_token() -> str:
 # ── Precio MEP ─────────────────────────────────────────────────────────────────
 
 
-def get_mep(token: str) -> float:
-    hoy = datetime.now().strftime("%Y-%m-%dT00:00:00.000Z")
+def get_mep(token: str, fecha: str | None = None) -> float:
+    """MEP del día. Con `fecha` (YYYY-MM-DD) trae el MEP histórico de ese día
+    — verificado contra Cohen: la API devuelve la cotización vigente a esa
+    fecha, no siempre la actual."""
+    fecha_iso = f"{fecha}T00:00:00.000Z" if fecha else datetime.now().strftime("%Y-%m-%dT00:00:00.000Z")
     resp = requests.post(
         f"{COHEN_BASE}/api/moneda/getCotizacionMoneda",
         headers={
@@ -66,7 +72,7 @@ def get_mep(token: str) -> float:
             "Accept": "application/json",
             "Content-Type": "application/json",
         },
-        json={"skip": 0, "take": 100, "order": [], "fechaCotizacion": hoy},
+        json={"skip": 0, "take": 100, "order": [], "fechaCotizacion": fecha_iso},
         timeout=15,
     )
     resp.raise_for_status()
@@ -112,6 +118,94 @@ def get_posiciones(id_comitente: int, token: str) -> list:
     )
     resp.raise_for_status()
     return [r for r in resp.json().get("data", []) if not r.get("esFilaSubtotal")]
+
+
+# Desde cuándo se busca el historial de boletos al reconstruir el costo de una
+# posición que Cohen devuelve en cero (ver fetch_gnr) — antes de esta fecha no
+# hay cuentas activas en la cartera actual, así que alcanza sin acercarse a
+# los timeouts que sí sufre api/posicion/ListarMovimientos con rangos amplios.
+BOLETOS_DESDE = "2015-01-01"
+
+
+def get_boletos(id_comitente: int, id_instrumento: int, token: str) -> list:
+    """Boletos de compra/venta de un instrumento puntual para una cuenta.
+    A diferencia de api/posicion/ListarMovimientos (que puede colgarse varios
+    minutos en algunas cuentas), este endpoint filtra server-side por
+    comitente+instrumento y responde en menos de 1 segundo — se usa sólo para
+    reconstruir el costo de posiciones con costoTotalARS/USD en cero."""
+    resp = requests.post(
+        f"{COHEN_BASE}/api/boletos/list",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        json={
+            "skip": 0,
+            "take": 1000,
+            "order": [],
+            "comitentes": [id_comitente],
+            "instrumentos": [id_instrumento],
+            "fechaConcertacionDesde": f"{BOLETOS_DESDE}T00:00:00.000Z",
+            "fechaConcertacionHasta": datetime.now().strftime("%Y-%m-%dT23:59:59.999Z"),
+        },
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("result", []) if not data.get("error") else []
+
+
+def reconstruir_costo_desde_boletos(
+    id_comitente: int, id_instrumento: int, cantidad_actual: float, token: str, mep_cache: dict
+) -> tuple:
+    """Cuando Cohen no informa costoTotalARS/USD (posiciones transferidas o
+    dadas en garantía sin compra registrada en la cuenta), se reconstruye a
+    partir de los boletos de Compra reales: para cada boleto se usa el
+    importe *neto* (ya incluye comisión/derechos de mercado/IVA de esa
+    operación puntual — más preciso que aplicarle nuestro ARANCEL_PCT
+    estimado), convertido a ARS/USD con el MEP del día exacto en que se
+    concertó si vino en pesos. Promedia el costo unitario de todas las
+    compras encontradas y lo escala a la cantidad que se tiene hoy (cubre el
+    caso de ventas parciales sin necesidad de reconstruir todo el historial
+    lote por lote). Devuelve (0.0, 0.0) si no se encuentra nada.
+    """
+    try:
+        boletos = get_boletos(id_comitente, id_instrumento, token)
+    except Exception:
+        return 0.0, 0.0
+
+    total_cantidad = 0.0
+    total_ars = 0.0
+    total_usd = 0.0
+    for b in boletos:
+        if b.get("tipoDeOperacion") != "Compra":
+            continue
+        cantidad = float(b.get("cantidadDelBoleto") or 0)
+        neto = float(b.get("importeNeto") or 0)
+        if cantidad <= 0 or neto <= 0:
+            continue
+        moneda = (b.get("moneda") or "").lower()
+        fecha = (b.get("fechaConcertacion") or "")[:10]
+        if "peso" in moneda:
+            if fecha not in mep_cache:
+                mep_cache[fecha] = get_mep(token, fecha)
+            mep_dia = mep_cache[fecha]
+            ars, usd = neto, (neto / mep_dia if mep_dia else 0.0)
+        else:
+            if fecha not in mep_cache:
+                mep_cache[fecha] = get_mep(token, fecha)
+            mep_dia = mep_cache[fecha]
+            ars, usd = neto * mep_dia, neto
+        total_cantidad += cantidad
+        total_ars += ars
+        total_usd += usd
+
+    if total_cantidad <= 0:
+        return 0.0, 0.0
+    costo_ars = round(total_ars / total_cantidad * cantidad_actual, 2)
+    costo_usd = round(total_usd / total_cantidad * cantidad_actual, 2)
+    return costo_ars, costo_usd
 
 
 def get_ganancia_realizada(id_comitente: int, token: str) -> list:
@@ -160,6 +254,8 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
     posiciones = []
     done = 0
     total = len(comitentes)
+    mep_cache: dict = {}  # fecha (YYYY-MM-DD) -> MEP, compartido entre posiciones
+    # para no repetir la consulta histórica cuando varios boletos caen el mismo día
 
     def fetch(c):
         return c["id"], get_posiciones(c["id"], token)
@@ -193,8 +289,22 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                 # invertido.
                 costo_ars_bruto = float(r.get("costoTotalARS") or 0)
                 costo_usd_bruto = float(r.get("costoTotalUSD") or 0)
-                costo_ars = round(costo_ars_bruto * ARANCEL_COMPRA, 2)
-                costo_usd = round(costo_usd_bruto * ARANCEL_COMPRA, 2)
+                if costo_ars_bruto == 0 and costo_usd_bruto == 0:
+                    # Cohen no tiene costo de compra para esta posición (típico
+                    # de títulos transferidos de otro custodio o dados en
+                    # garantía) — se reconstruye a partir del boleto real de
+                    # compra en vez de dejar el P&L en cero.
+                    id_instrumento = r.get("idInstrumento")
+                    cantidad_pos = float(r.get("cantidad") or 0)
+                    if id_instrumento and cantidad_pos:
+                        costo_ars, costo_usd = reconstruir_costo_desde_boletos(
+                            id_com, id_instrumento, cantidad_pos, token, mep_cache
+                        )
+                    else:
+                        costo_ars, costo_usd = 0.0, 0.0
+                else:
+                    costo_ars = round(costo_ars_bruto * ARANCEL_COMPRA, 2)
+                    costo_usd = round(costo_usd_bruto * ARANCEL_COMPRA, 2)
                 # saldoValorizadoUSD viene nativo de Cohen — más preciso que
                 # convertir valor_ars con el MEP de hoy (evita una doble
                 # conversión y usa el mismo dólar que ya usa Cohen internamente
