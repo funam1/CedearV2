@@ -567,7 +567,7 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
       &nbsp;|&nbsp; Prox: <span id="countdown"></span>
       &nbsp;|&nbsp; 👤 <span class="text-white-50">__USER_NAME__</span>
       &nbsp;
-      <button class="ibtn" id="btnForceRefresh" title="Forzar actualización" onclick="window.parent.location.href=window.parent.location.pathname+'?force_refresh=1'">&#8635;</button>
+      <button class="ibtn" id="btnForceRefresh" title="Forzar actualización" onclick="window.parent.location.href='/?force_refresh=1'">&#8635;</button>
       <button class="ibtn" id="btnTheme" title="Modo claro/oscuro">&#9789;</button>
       <button class="btn-logout" onclick="window.parent.location.href='/_stcore/logout'">Salir</button>
     </span>
