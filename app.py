@@ -562,11 +562,12 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
     <span class="navbar-brand fw-bold fs-6">Dashboard GNR &mdash; Cohen</span>
     <span class="text-white-50 d-flex align-items-center gap-2" style="font-size:.72rem">
       MEP: <strong class="text-warning">$ __MEP_DISPLAY__</strong>
-      &nbsp;|&nbsp; Arancel: 1.1%
+      &nbsp;|&nbsp; Arancel: 1.21%
       &nbsp;|&nbsp; Actualizado: __TS__
       &nbsp;|&nbsp; Prox: <span id="countdown"></span>
       &nbsp;|&nbsp; 👤 <span class="text-white-50">__USER_NAME__</span>
       &nbsp;
+      <button class="ibtn" id="btnForceRefresh" title="Forzar actualización" onclick="window.parent.location.href=window.parent.location.pathname+'?force_refresh=1'">&#8635;</button>
       <button class="ibtn" id="btnTheme" title="Modo claro/oscuro">&#9789;</button>
       <button class="btn-logout" onclick="window.parent.location.href='/_stcore/logout'">Salir</button>
     </span>
@@ -1567,6 +1568,15 @@ def check_auth() -> bool:
 
 if not check_auth():
     st.stop()
+
+# El botón ↻ del navbar del dashboard CEDEAR/GNR navega a esta misma URL con
+# ?force_refresh=1 (no puede llamar a Python directamente porque vive dentro
+# del iframe embebido) — acá lo interpretamos como pedido de vaciar la caché
+# compartida y volver a pedirle los datos a Cohen.
+if st.query_params.get("force_refresh") == "1":
+    cargar_datos.clear()
+    st.query_params.clear()
+    st.rerun()
 
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 
