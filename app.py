@@ -127,12 +127,14 @@ def get_posiciones(id_comitente: int, token: str) -> list:
 BOLETOS_DESDE = "2015-01-01"
 
 
-def get_boletos(id_comitente: int, id_instrumento: int, token: str) -> list:
-    """Boletos de compra/venta de un instrumento puntual para una cuenta.
+def get_boletos_comitente(id_comitente: int, ids_instrumento: list, token: str) -> list:
+    """Boletos de compra/venta de una cuenta para uno o más instrumentos.
     A diferencia de api/posicion/ListarMovimientos (que puede colgarse varios
     minutos en algunas cuentas), este endpoint filtra server-side por
-    comitente+instrumento y responde en menos de 1 segundo — se usa sólo para
-    reconstruir el costo de posiciones con costoTotalARS/USD en cero."""
+    comitente+instrumentos y responde en menos de 1 segundo incluso pasándole
+    todos los instrumentos que tiene la cuenta en un solo pedido."""
+    if not ids_instrumento:
+        return []
     resp = requests.post(
         f"{COHEN_BASE}/api/boletos/list",
         headers={
@@ -142,10 +144,10 @@ def get_boletos(id_comitente: int, id_instrumento: int, token: str) -> list:
         },
         json={
             "skip": 0,
-            "take": 1000,
+            "take": 2000,
             "order": [],
             "comitentes": [id_comitente],
-            "instrumentos": [id_instrumento],
+            "instrumentos": ids_instrumento,
             "fechaConcertacionDesde": f"{BOLETOS_DESDE}T00:00:00.000Z",
             "fechaConcertacionHasta": datetime.now().strftime("%Y-%m-%dT23:59:59.999Z"),
         },
@@ -171,7 +173,7 @@ def reconstruir_costo_desde_boletos(
     lote por lote). Devuelve (0.0, 0.0) si no se encuentra nada.
     """
     try:
-        boletos = get_boletos(id_comitente, id_instrumento, token)
+        boletos = get_boletos_comitente(id_comitente, [id_instrumento], token)
     except Exception:
         return 0.0, 0.0
 
@@ -245,6 +247,60 @@ def parsear_comitente(c: dict) -> tuple:
     return str(c["id"]), desc
 
 
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _boletos_comitente_del_dia(
+    id_comitente: int, ids_instrumento: tuple, hoy: str, _token: str
+) -> list:
+    """Boletos de una cuenta para "última compra + ventas posteriores" (ver
+    extraer_ultima_compra). Cacheado por día — dentro del mismo día no hace
+    falta repetir esta consulta en cada refresco de 30 minutos, ya que las
+    compras/ventas pasadas no cambian retroactivamente. `hoy` entra en la
+    clave de caché para invalidar a la medianoche, e `ids_instrumento` para
+    invalidar sólo esta cuenta puntual si compra un activo nuevo que todavía
+    no estaba cubierto (Streamlit trata cada combinación de argumentos como
+    una entrada de caché distinta). `_token` lleva guión bajo a propósito:
+    Streamlit no lo usa para la clave de caché (cambia en cada refresco de
+    cargar_datos), sólo lo necesita la llamada real a la API.
+    """
+    return get_boletos_comitente(id_comitente, list(ids_instrumento), _token)
+
+
+def extraer_ultima_compra(boletos: list, ticker: str) -> tuple:
+    """De los boletos de una cuenta, aísla los de `ticker` (el campo
+    "instrumento" de Cohen es texto libre tipo "TICKER - ISIN - Descripción",
+    se parsea el prefijo) y arma la última Compra real + las Ventas
+    posteriores a esa fecha, para mostrar en el detalle de la posición."""
+    relevantes = [
+        b for b in boletos
+        if (b.get("instrumento") or "").split(" - ")[0].strip() == ticker
+    ]
+    compras = sorted(
+        (b for b in relevantes if b.get("tipoDeOperacion") == "Compra"),
+        key=lambda b: b.get("fechaConcertacion") or "",
+    )
+    if not compras:
+        return None, []
+    ultima = compras[-1]
+    fecha_ultima = ultima.get("fechaConcertacion") or ""
+    cantidad = float(ultima.get("cantidadDelBoleto") or 0)
+    neto = float(ultima.get("importeNeto") or 0)
+    ultima_compra = {
+        "fecha": fecha_ultima,
+        "cantidad": cantidad,
+        "precio_unitario": round(neto / cantidad, 4) if cantidad else None,
+        "moneda": ultima.get("moneda") or "",
+        "importe_neto": neto,
+    }
+    ventas_posteriores = [
+        {"fecha": v.get("fechaConcertacion") or "", "cantidad": float(v.get("cantidadDelBoleto") or 0)}
+        for v in sorted(
+            (b for b in relevantes if b.get("tipoDeOperacion") == "Venta" and (b.get("fechaConcertacion") or "") > fecha_ultima),
+            key=lambda b: b.get("fechaConcertacion") or "",
+        )
+    ]
+    return ultima_compra, ventas_posteriores
+
+
 # ── Fetch paralelo — GNR ───────────────────────────────────────────────────────
 
 
@@ -256,9 +312,24 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
     total = len(comitentes)
     mep_cache: dict = {}  # fecha (YYYY-MM-DD) -> MEP, compartido entre posiciones
     # para no repetir la consulta histórica cuando varios boletos caen el mismo día
+    hoy_str = date.today().isoformat()
 
     def fetch(c):
-        return c["id"], get_posiciones(c["id"], token)
+        rows = get_posiciones(c["id"], token)
+        ids_instrumento = sorted({
+            r.get("idInstrumento")
+            for r in rows
+            if r.get("idInstrumento")
+            and (r.get("tipoInstrumento") or r.get("instrumentoTipoDescripcion", "")) in TIPOS_GNR
+        })
+        # Cacheado por día (ver _boletos_comitente_del_dia) — sólo pega a
+        # Cohen la primera vez que alguien entra después de medianoche; el
+        # resto de los refrescos del día lo reutilizan sin costo.
+        boletos_comitente = (
+            _boletos_comitente_del_dia(c["id"], tuple(ids_instrumento), hoy_str, token)
+            if ids_instrumento else []
+        )
+        return c["id"], rows, boletos_comitente
 
     with ThreadPoolExecutor(max_workers=20) as ex:
         futuros = {ex.submit(fetch, c): c for c in comitentes}
@@ -269,7 +340,7 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                     done / total, text=f"GNR: {done}/{total} comitentes"
                 )
             try:
-                id_com, rows = fut.result()
+                id_com, rows, boletos_comitente = fut.result()
             except Exception:
                 continue
             nro, nombre = cmap.get(id_com, (str(id_com), ""))
@@ -330,13 +401,17 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                 pnl_pct_ars = round(pnl_ars / costo_ars * 100, 2) if costo_ars else 0.0
                 pnl_usd = round(valor_neto_usd - costo_usd, 2)
                 pnl_pct_usd = round(pnl_usd / costo_usd * 100, 2) if costo_usd else 0.0
+                ticker = r.get("ticker") or r.get("instrumentoSimbolo", "")
+                ultima_compra, ventas_posteriores = extraer_ultima_compra(
+                    boletos_comitente, ticker
+                )
                 posiciones.append(
                     {
                         "id_comitente": id_com,
                         "id_instrumento": r.get("idInstrumento"),
                         "nro_cuenta": nro,
                         "cliente": nombre,
-                        "ticker": r.get("ticker") or r.get("instrumentoSimbolo", ""),
+                        "ticker": ticker,
                         "descripcion": r.get("denominacion")
                         or r.get("instrumentoDescripcion", ""),
                         "tipo": tipo,
@@ -359,6 +434,8 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                         "var_dia_ars": float(r.get("varDiariaARS") or 0),
                         "var_dia_pct": float(r.get("varDiariaPctARS") or 0),
                         "fecha": r.get("fechaCotizacionString") or "",
+                        "ultima_compra": ultima_compra,
+                        "ventas_posteriores": ventas_posteriores,
                     }
                 )
     return posiciones
@@ -1016,7 +1093,6 @@ const DATA    = __DATA_JSON__;
 const DATA_GR = __DATA_GR_JSON__;
 const MEP     = __MEP__;
 const MERCADO = __MERCADO_JSON__;
-const DETALLE_BOLETA = __DETALLE_BOLETA_JSON__;
 
 // ── Utils ──────────────────────────────────────────────────────────────────
 const fmt    = (v,d=0) => v==null?'':Number(v).toLocaleString('es-AR',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -1246,7 +1322,7 @@ function renderCliente(nro){
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS (ref.)</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div></div></div>`;
   document.getElementById('tbody-cliente').innerHTML=
     [...rows].sort((a,b)=>(b.valor_usd||0)-(a.valor_usd||0)).map(d=>`
-    <tr${d.id_instrumento?` style="cursor:pointer" title="Ver última compra / TNA" onclick="verDetallePosicion(${d.id_comitente},${d.id_instrumento})"`:''}>
+    <tr${d.ultima_compra?` style="cursor:pointer" title="Ver última compra / TNA" onclick="verDetallePosicion(${d.id_comitente},${d.id_instrumento})"`:''}>
       <td><strong>${d.ticker}</strong></td>
       <td class="text-muted">${d.descripcion.substring(0,32)}</td>
       <td><span class="badge bg-secondary">${d.tipo}</span></td>
@@ -1262,18 +1338,6 @@ function renderCliente(nro){
     </tr>`).join('');
 }
 
-// Click en una fila de "Por cliente": pide a Cohen el historial de boletos de
-// esa cuenta+instrumento. La tabla vive en el iframe embebido de
-// components.v1.html, que está sandboxeado sin allow-top-navigation — no
-// puede llamar a Python directamente ni navegar la pestaña actual
-// (window.parent.location.href es bloqueado por el navegador), así que abre
-// el resultado en una pestaña nueva (mismo patrón que el botón de
-// actualización forzada del navbar) — el backend resuelve la consulta ahí y
-// esa nueva pestaña muestra la vista completa con el detalle ya armado.
-function verDetallePosicion(idComitente, idInstrumento){
-  window.open('/?detalle_boleta=' + idComitente + ':' + idInstrumento, '_blank');
-}
-
 function fmtFechaCorta(iso){
   if(!iso) return '';
   const f = new Date(iso);
@@ -1281,32 +1345,24 @@ function fmtFechaCorta(iso){
   return f.toLocaleDateString('es-AR');
 }
 
-function mostrarDetalleBoletaSiCorresponde(){
-  if(!DETALLE_BOLETA || DETALLE_BOLETA.error) return;
-  const fila = DATA.find(d=>d.id_comitente===DETALLE_BOLETA.id_comitente && d.id_instrumento===DETALLE_BOLETA.id_instrumento);
-  const boletos = (DETALLE_BOLETA.boletos||[])
-    .slice()
-    .sort((a,b)=>new Date(a.fechaConcertacion)-new Date(b.fechaConcertacion));
-  const compras = boletos.filter(b=>b.tipoDeOperacion==='Compra');
-  if(!compras.length){
-    document.getElementById('detallePosicionTitulo').textContent = fila ? `${fila.ticker} — ${fila.nro_cuenta}` : 'Detalle de la posición';
-    document.getElementById('detallePosicionBody').innerHTML = '<p class="text-muted mb-0">No se encontraron boletos de compra para esta posición en el rango consultado.</p>';
-    new bootstrap.Modal(document.getElementById('modalDetallePosicion')).show();
-    return;
-  }
-  const ultimaCompra = compras[compras.length-1];
-  const ventasPosteriores = boletos.filter(b=>b.tipoDeOperacion==='Venta' && new Date(b.fechaConcertacion) > new Date(ultimaCompra.fechaConcertacion));
-  const dias = Math.max(1, Math.round((new Date() - new Date(ultimaCompra.fechaConcertacion)) / 86400000));
-  const precioUnitario = ultimaCompra.cantidadDelBoleto ? ultimaCompra.importeNeto/ultimaCompra.cantidadDelBoleto : null;
-  const tna = (fila && fila.pnl_pct_usd!=null) ? fila.pnl_pct_usd/dias*365 : null;
+// Click en una fila de "Por cliente": "última compra"/"ventas posteriores"
+// ya vienen precalculadas en DATA (se arman una vez por día en el backend,
+// ver _boletos_comitente_del_dia), así que esto es 100% client-side — sin
+// pedidos nuevos, sin pestaña nueva, sin perder el tab/cliente seleccionado.
+function verDetallePosicion(idComitente, idInstrumento){
+  const fila = DATA.find(d=>d.id_comitente===idComitente && d.id_instrumento===idInstrumento);
+  if(!fila || !fila.ultima_compra) return;
+  const uc = fila.ultima_compra;
+  const dias = Math.max(1, Math.round((new Date() - new Date(uc.fecha)) / 86400000));
+  const tna = (fila.pnl_pct_usd!=null) ? fila.pnl_pct_usd/dias*365 : null;
 
-  let html = `<div class="mb-2"><strong>Última compra:</strong> ${fmtFechaCorta(ultimaCompra.fechaConcertacion)}`
-    + ` — ${fmt(ultimaCompra.cantidadDelBoleto,2)} u. a ${precioUnitario!=null?fmt(precioUnitario,2):'-'} ${ultimaCompra.moneda||''} c/u`
-    + ` (neto: ${fmt(ultimaCompra.importeNeto,2)} ${ultimaCompra.moneda||''})</div>`;
+  let html = `<div class="mb-2"><strong>Última compra:</strong> ${fmtFechaCorta(uc.fecha)}`
+    + ` — ${fmt(uc.cantidad,2)} u. a ${uc.precio_unitario!=null?fmt(uc.precio_unitario,2):'-'} ${uc.moneda||''} c/u`
+    + ` (neto: ${fmt(uc.importe_neto,2)} ${uc.moneda||''})</div>`;
   html += `<div class="mb-2"><strong>Días desde la compra:</strong> ${dias}</div>`;
-  if(ventasPosteriores.length){
+  if(fila.ventas_posteriores && fila.ventas_posteriores.length){
     html += `<div class="mb-2"><strong>Ventas parciales posteriores:</strong><ul class="mb-0">`
-      + ventasPosteriores.map(v=>`<li>${fmtFechaCorta(v.fechaConcertacion)} — ${fmt(v.cantidadDelBoleto,2)} u.</li>`).join('')
+      + fila.ventas_posteriores.map(v=>`<li>${fmtFechaCorta(v.fecha)} — ${fmt(v.cantidad,2)} u.</li>`).join('')
       + `</ul></div>`;
   } else {
     html += `<div class="mb-2 text-muted">Sin ventas parciales posteriores a esta compra.</div>`;
@@ -1315,15 +1371,8 @@ function mostrarDetalleBoletaSiCorresponde(){
     html += `<div class="mb-0"><strong>TNA estimada (sobre la posición actual):</strong> <span class="${cls(tna)}">${fmtPct(tna)}</span>`
       + `<div class="text-muted" style="font-size:.68rem">P&amp;L % USD actual (${fmtPct(fila.pnl_pct_usd)}) anualizado sobre ${dias} días — no es TIR, es una tasa simple.</div></div>`;
   }
-  document.getElementById('detallePosicionTitulo').textContent = fila ? `${fila.ticker} — ${fila.nro_cuenta}` : 'Detalle de la posición';
+  document.getElementById('detallePosicionTitulo').textContent = `${fila.ticker} — ${fila.nro_cuenta}`;
   document.getElementById('detallePosicionBody').innerHTML = html;
-
-  const tabClienteLink = document.querySelector('a[href="#tab-cliente"]');
-  if(fila && tabClienteLink){
-    new bootstrap.Tab(tabClienteLink).show();
-    document.getElementById('search-cliente-input').value = `${fila.nro_cuenta} - ${fila.cliente}`;
-    renderCliente(fila.nro_cuenta);
-  }
   new bootstrap.Modal(document.getElementById('modalDetallePosicion')).show();
 }
 
@@ -1651,7 +1700,6 @@ buildCharts();
 buildHeatmap();
 buildGR();
 renderAlertas();
-mostrarDetalleBoletaSiCorresponde();
 </script>
 </body>
 </html>"""
@@ -1663,7 +1711,7 @@ def _js_safe(data) -> str:
 
 def generar_html(
     posiciones: list, gr: list, mep: float, ts: str, user_name: str = "",
-    mercado_result: dict | None = None, detalle_boleta: dict | None = None,
+    mercado_result: dict | None = None,
 ) -> str:
     return (
         HTML_TEMPLATE.replace("__DATA_JSON__", _js_safe(posiciones))
@@ -1674,7 +1722,6 @@ def generar_html(
         .replace("__INTERVAL_S__", str(INTERVAL_S))
         .replace("__USER_NAME__", user_name)
         .replace("__MERCADO_JSON__", _js_safe(mercado_result))
-        .replace("__DETALLE_BOLETA_JSON__", _js_safe(detalle_boleta))
     )
 
 
@@ -1882,36 +1929,10 @@ if pagina == "CEDEAR / GNR":
             finally:
                 progress_bar.empty()
 
-    # Detalle de "última compra + ventas parciales" de una posición puntual:
-    # se pide al hacer click en una fila de "Por cliente" — la tabla vive en
-    # el iframe embebido (sandboxeado, sin permiso para navegar la pestaña
-    # actual), así que el click abre esta query en una pestaña nueva y acá se
-    # resuelve con una consulta puntual y rápida a boletos/list (no se
-    # precalcula para todas
-    # las posiciones porque sería cientos de llamadas extra en cada refresco).
-    detalle_boleta = None
-    bq = st.query_params.get("detalle_boleta")
-    if bq and ":" in bq:
-        try:
-            id_com_str, id_instr_str = bq.split(":", 1)
-            id_com_dtl, id_instr_dtl = int(id_com_str), int(id_instr_str)
-            token_dtl = obtener_token()
-            boletos_dtl = get_boletos(id_com_dtl, id_instr_dtl, token_dtl)
-            detalle_boleta = {
-                "id_comitente": id_com_dtl,
-                "id_instrumento": id_instr_dtl,
-                "boletos": boletos_dtl,
-            }
-        except Exception:
-            detalle_boleta = {"error": True}
-        st.query_params.clear()
-
     # Último resultado calculado por CUALQUIER usuario en este proceso (no
     # session_state) — así todos ven el mismo cálculo sin tener que pedirlo
     # cada uno por su lado.
-    html_content = generar_html(
-        gnr, gr, mep, ts, user_name, mercado.obtener_ultimo_resultado(), detalle_boleta
-    )
+    html_content = generar_html(gnr, gr, mep, ts, user_name, mercado.obtener_ultimo_resultado())
     st.components.v1.html(html_content, height=900, scrolling=True)
 
 # ── Transferencias ───────────────────────────────────────────────────────────
