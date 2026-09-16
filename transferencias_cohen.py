@@ -516,7 +516,7 @@ tbody tr:hover{background:var(--sur2)}
     <div class="spacer"></div>
     <button class="hoy-btn" id="btnHoy">&#128197; HOY</button>
     <button class="ibtn" id="btnTheme" title="Modo claro/oscuro">&#9789;</button>
-    <button class="ibtn" id="btnLogout" title="Cerrar sesión" onclick="window.parent.location.href='/_stcore/logout'">&#9099;</button>
+    <button class="ibtn" id="btnLogout" title="Cerrar sesión (abre en pestaña nueva)" onclick="window.open('/_stcore/logout','_blank')">&#9099;</button>
   </div>
   <div class="meta">
     <span id="metaRango"></span>

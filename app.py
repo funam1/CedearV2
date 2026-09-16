@@ -678,9 +678,9 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
       &nbsp;|&nbsp; Prox: <span id="countdown"></span>
       &nbsp;|&nbsp; 👤 <span class="text-white-50">__USER_NAME__</span>
       &nbsp;
-      <button class="ibtn" id="btnForceRefresh" title="Forzar actualización" onclick="window.parent.location.href='/?force_refresh=1'">&#8635;</button>
+      <button class="ibtn" id="btnForceRefresh" title="Forzar actualización (abre en pestaña nueva)" onclick="window.open('/?force_refresh=1','_blank')">&#8635;</button>
       <button class="ibtn" id="btnTheme" title="Modo claro/oscuro">&#9789;</button>
-      <button class="btn-logout" onclick="window.parent.location.href='/_stcore/logout'">Salir</button>
+      <button class="btn-logout" title="Abre el logout en pestaña nueva" onclick="window.open('/_stcore/logout','_blank')">Salir</button>
     </span>
   </div>
 </nav>
@@ -1263,12 +1263,15 @@ function renderCliente(nro){
 }
 
 // Click en una fila de "Por cliente": pide a Cohen el historial de boletos de
-// esa cuenta+instrumento. La tabla vive en el iframe embebido y no puede
-// llamar a Python directamente, así que navega la ventana padre (mismo
-// patrón que el botón de actualización forzada del navbar) — el backend
-// resuelve la consulta y reabre esta misma vista con el detalle ya armado.
+// esa cuenta+instrumento. La tabla vive en el iframe embebido de
+// components.v1.html, que está sandboxeado sin allow-top-navigation — no
+// puede llamar a Python directamente ni navegar la pestaña actual
+// (window.parent.location.href es bloqueado por el navegador), así que abre
+// el resultado en una pestaña nueva (mismo patrón que el botón de
+// actualización forzada del navbar) — el backend resuelve la consulta ahí y
+// esa nueva pestaña muestra la vista completa con el detalle ya armado.
 function verDetallePosicion(idComitente, idInstrumento){
-  window.parent.location.href = '/?detalle_boleta=' + idComitente + ':' + idInstrumento;
+  window.open('/?detalle_boleta=' + idComitente + ':' + idInstrumento, '_blank');
 }
 
 function fmtFechaCorta(iso){
@@ -1758,10 +1761,14 @@ def check_auth() -> bool:
 if not check_auth():
     st.stop()
 
-# El botón ↻ del navbar del dashboard CEDEAR/GNR navega a esta misma URL con
-# ?force_refresh=1 (no puede llamar a Python directamente porque vive dentro
-# del iframe embebido) — acá lo interpretamos como pedido de vaciar la caché
-# compartida y volver a pedirle los datos a Cohen.
+# El botón ↻ del navbar del dashboard CEDEAR/GNR abre esta misma URL en una
+# pestaña nueva con ?force_refresh=1 (no puede llamar a Python directamente
+# porque vive dentro del iframe embebido, y el iframe de components.v1.html
+# está sandboxeado sin allow-top-navigation — un window.parent.location.href
+# directo es bloqueado por el navegador; window.open(..., '_blank') sí
+# funciona porque abre un contexto de navegación nuevo en vez de navegar el
+# frame padre existente) — acá lo interpretamos como pedido de vaciar la
+# caché compartida y volver a pedirle los datos a Cohen.
 if st.query_params.get("force_refresh") == "1":
     cargar_datos.clear()
     st.query_params.clear()
@@ -1876,10 +1883,11 @@ if pagina == "CEDEAR / GNR":
                 progress_bar.empty()
 
     # Detalle de "última compra + ventas parciales" de una posición puntual:
-    # se pide al hacer click en una fila de "Por cliente" — el navbar/tabla
-    # vive en el iframe embebido, así que (igual que force_refresh) el click
-    # navega la ventana padre con esta query y acá se resuelve con una
-    # consulta puntual y rápida a boletos/list (no se precalcula para todas
+    # se pide al hacer click en una fila de "Por cliente" — la tabla vive en
+    # el iframe embebido (sandboxeado, sin permiso para navegar la pestaña
+    # actual), así que el click abre esta query en una pestaña nueva y acá se
+    # resuelve con una consulta puntual y rápida a boletos/list (no se
+    # precalcula para todas
     # las posiciones porque sería cientos de llamadas extra en cada refresco).
     detalle_boleta = None
     bq = st.query_params.get("detalle_boleta")
