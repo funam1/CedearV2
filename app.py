@@ -82,6 +82,15 @@ def get_mep(token: str, fecha: str | None = None) -> float:
     return 0.0
 
 
+@st.cache_data(ttl=None, show_spinner=False)
+def mep_historico(fecha: str, _token: str) -> float:
+    """MEP de una fecha pasada — se cachea sin vencimiento porque un valor
+    histórico ya cerrado no cambia nunca (a diferencia del MEP de hoy, que sí
+    se recacha cada INTERVAL_S vía cargar_datos). Compartido por todos los
+    usuarios y por toda la vida del proceso, no sólo dentro de un fetch_gnr."""
+    return get_mep(_token, fecha)
+
+
 # ── API helpers ────────────────────────────────────────────────────────────────
 
 
@@ -159,7 +168,7 @@ def get_boletos_comitente(id_comitente: int, ids_instrumento: list, token: str) 
 
 
 def reconstruir_costo_desde_boletos(
-    id_comitente: int, id_instrumento: int, cantidad_actual: float, token: str, mep_cache: dict
+    id_comitente: int, id_instrumento: int, cantidad_actual: float, token: str
 ) -> tuple:
     """Cuando Cohen no informa costoTotalARS/USD (posiciones transferidas o
     dadas en garantía sin compra registrada en la cuenta), se reconstruye a
@@ -189,15 +198,10 @@ def reconstruir_costo_desde_boletos(
             continue
         moneda = (b.get("moneda") or "").lower()
         fecha = (b.get("fechaConcertacion") or "")[:10]
+        mep_dia = mep_historico(fecha, token)
         if "peso" in moneda:
-            if fecha not in mep_cache:
-                mep_cache[fecha] = get_mep(token, fecha)
-            mep_dia = mep_cache[fecha]
             ars, usd = neto, (neto / mep_dia if mep_dia else 0.0)
         else:
-            if fecha not in mep_cache:
-                mep_cache[fecha] = get_mep(token, fecha)
-            mep_dia = mep_cache[fecha]
             ars, usd = neto * mep_dia, neto
         total_cantidad += cantidad
         total_ars += ars
@@ -265,11 +269,14 @@ def _boletos_comitente_del_dia(
     return get_boletos_comitente(id_comitente, list(ids_instrumento), _token)
 
 
-def extraer_ultima_compra(boletos: list, ticker: str) -> tuple:
+def extraer_ultima_compra(boletos: list, ticker: str, token: str) -> tuple:
     """De los boletos de una cuenta, aísla los de `ticker` (el campo
     "instrumento" de Cohen es texto libre tipo "TICKER - ISIN - Descripción",
     se parsea el prefijo) y arma la última Compra real + las Ventas
-    posteriores a esa fecha, para mostrar en el detalle de la posición."""
+    posteriores a esa fecha, para mostrar en el detalle de la posición.
+    Valoriza la compra en USD con el mismo criterio que el resto del
+    dashboard: importe neto (ya con el arancel real de esa operación)
+    convertido con el MEP histórico del día exacto en que se concertó."""
     relevantes = [
         b for b in boletos
         if (b.get("instrumento") or "").split(" - ")[0].strip() == ticker
@@ -284,12 +291,20 @@ def extraer_ultima_compra(boletos: list, ticker: str) -> tuple:
     fecha_ultima = ultima.get("fechaConcertacion") or ""
     cantidad = float(ultima.get("cantidadDelBoleto") or 0)
     neto = float(ultima.get("importeNeto") or 0)
+    moneda = ultima.get("moneda") or ""
+    mep_dia = mep_historico(fecha_ultima[:10], token)
+    if "peso" in moneda.lower():
+        importe_neto_usd = round(neto / mep_dia, 2) if mep_dia else None
+    else:
+        importe_neto_usd = round(neto, 2)
     ultima_compra = {
         "fecha": fecha_ultima,
         "cantidad": cantidad,
         "precio_unitario": round(neto / cantidad, 4) if cantidad else None,
-        "moneda": ultima.get("moneda") or "",
+        "moneda": moneda,
         "importe_neto": neto,
+        "importe_neto_usd": importe_neto_usd,
+        "precio_unitario_usd": round(importe_neto_usd / cantidad, 4) if (importe_neto_usd is not None and cantidad) else None,
     }
     ventas_posteriores = [
         {"fecha": v.get("fechaConcertacion") or "", "cantidad": float(v.get("cantidadDelBoleto") or 0)}
@@ -310,8 +325,6 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
     posiciones = []
     done = 0
     total = len(comitentes)
-    mep_cache: dict = {}  # fecha (YYYY-MM-DD) -> MEP, compartido entre posiciones
-    # para no repetir la consulta histórica cuando varios boletos caen el mismo día
     hoy_str = date.today().isoformat()
 
     def fetch(c):
@@ -369,7 +382,7 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                     cantidad_pos = float(r.get("cantidad") or 0)
                     if id_instrumento and cantidad_pos:
                         costo_ars, costo_usd = reconstruir_costo_desde_boletos(
-                            id_com, id_instrumento, cantidad_pos, token, mep_cache
+                            id_com, id_instrumento, cantidad_pos, token
                         )
                     else:
                         costo_ars, costo_usd = 0.0, 0.0
@@ -403,7 +416,7 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                 pnl_pct_usd = round(pnl_usd / costo_usd * 100, 2) if costo_usd else 0.0
                 ticker = r.get("ticker") or r.get("instrumentoSimbolo", "")
                 ultima_compra, ventas_posteriores = extraer_ultima_compra(
-                    boletos_comitente, ticker
+                    boletos_comitente, ticker, token
                 )
                 posiciones.append(
                     {
@@ -808,8 +821,7 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
             <th onclick="sortTable('main-table',8)" class="text-end">Costo USD</th>
             <th onclick="sortTable('main-table',9)" class="text-end">P&amp;L USD</th>
             <th onclick="sortTable('main-table',10)" class="text-end">P&amp;L % USD</th>
-            <th onclick="sortTable('main-table',11)" class="text-end text-muted">Valor ARS (ref.)</th>
-            <th onclick="sortTable('main-table',12)" class="text-end text-muted">P&amp;L ARS (ref.)</th>
+            <th onclick="sortTable('main-table',11)" class="text-end">Días últ. compra</th>
           </tr></thead>
           <tbody id="main-tbody"></tbody>
         </table>
@@ -912,8 +924,7 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
             <th onclick="sortTable('table-cliente',7)" class="text-end">Costo USD</th>
             <th onclick="sortTable('table-cliente',8)" class="text-end">P&amp;L USD</th>
             <th onclick="sortTable('table-cliente',9)" class="text-end">P&amp;L % USD</th>
-            <th onclick="sortTable('table-cliente',10)" class="text-end text-muted">Valor ARS (ref.)</th>
-            <th onclick="sortTable('table-cliente',11)" class="text-end text-muted">P&amp;L ARS (ref.)</th>
+            <th onclick="sortTable('table-cliente',10)" class="text-end">Días últ. compra</th>
           </tr></thead>
           <tbody id="tbody-cliente"></tbody>
         </table>
@@ -943,8 +954,7 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
             <th onclick="sortTable('table-ticker',6)" class="text-end">Costo USD</th>
             <th onclick="sortTable('table-ticker',7)" class="text-end">P&amp;L USD</th>
             <th onclick="sortTable('table-ticker',8)" class="text-end">P&amp;L % USD</th>
-            <th onclick="sortTable('table-ticker',9)" class="text-end text-muted">Valor ARS (ref.)</th>
-            <th onclick="sortTable('table-ticker',10)" class="text-end text-muted">P&amp;L ARS (ref.)</th>
+            <th onclick="sortTable('table-ticker',9)" class="text-end">Días últ. compra</th>
           </tr></thead>
           <tbody id="tbody-ticker"></tbody>
         </table>
@@ -1155,8 +1165,7 @@ function renderMainRows(rows){
       <td class="text-end">${fmt(d.costo_usd,2)}</td>
       <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
       <td class="text-end">${pnlBadge(d.pnl_pct_usd)}</td>
-      <td class="text-end text-muted">${fmt(d.valor_ars,0)}</td>
-      <td class="text-end text-muted">${fmt(d.pnl_ars,0)}</td>
+      ${celdaDiasUltimaCompra(d)}
     </tr>`).join('');
   document.getElementById('count-label').textContent=`Mostrando ${rows.length} de ${DATA.length} posiciones`;
 }
@@ -1322,7 +1331,7 @@ function renderCliente(nro){
     <div class="col-auto"><div class="card kpi-card p-3"><div class="kpi-label">P&L ARS (ref.)</div><div class="kpi-value ${cls(tp)}">$ ${fmt(tp)}</div></div></div>`;
   document.getElementById('tbody-cliente').innerHTML=
     [...rows].sort((a,b)=>(b.valor_usd||0)-(a.valor_usd||0)).map(d=>`
-    <tr${d.ultima_compra?` style="cursor:pointer" title="Ver última compra / TNA" onclick="verDetallePosicion(${d.id_comitente},${d.id_instrumento})"`:''}>
+    <tr>
       <td><strong>${d.ticker}</strong></td>
       <td class="text-muted">${d.descripcion.substring(0,32)}</td>
       <td><span class="badge bg-secondary">${d.tipo}</span></td>
@@ -1333,8 +1342,7 @@ function renderCliente(nro){
       <td class="text-end">${fmt(d.costo_usd,2)}</td>
       <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
       <td class="text-end">${pnlBadge(d.pnl_pct_usd)}</td>
-      <td class="text-end text-muted">${fmt(d.valor_ars,0)}</td>
-      <td class="text-end text-muted">${fmt(d.pnl_ars,0)}</td>
+      ${celdaDiasUltimaCompra(d)}
     </tr>`).join('');
 }
 
@@ -1345,20 +1353,42 @@ function fmtFechaCorta(iso){
   return f.toLocaleDateString('es-AR');
 }
 
+// Celda reutilizable "Días últ. compra" — clickeable, abre el detalle de la
+// posición (última compra / ventas posteriores / TNA). Usada en las 4
+// tablas de posiciones (tabla completa, por cliente, por ticker, alertas).
+function celdaDiasUltimaCompra(d){
+  if(!d.ultima_compra) return '<td class="text-end text-muted">—</td>';
+  const dias = diasDesdeCompra(d.ultima_compra.fecha);
+  return `<td class="text-end"><span style="cursor:pointer;text-decoration:underline dotted;" title="Ver última compra / TNA" onclick="verDetallePosicion(${d.id_comitente},${d.id_instrumento})">${dias}</span></td>`;
+}
+
 // Click en una fila de "Por cliente": "última compra"/"ventas posteriores"
 // ya vienen precalculadas en DATA (se arman una vez por día en el backend,
 // ver _boletos_comitente_del_dia), así que esto es 100% client-side — sin
 // pedidos nuevos, sin pestaña nueva, sin perder el tab/cliente seleccionado.
+function diasDesdeCompra(fecha){
+  return Math.max(1, Math.round((new Date() - new Date(fecha)) / 86400000));
+}
+
 function verDetallePosicion(idComitente, idInstrumento){
   const fila = DATA.find(d=>d.id_comitente===idComitente && d.id_instrumento===idInstrumento);
   if(!fila || !fila.ultima_compra) return;
   const uc = fila.ultima_compra;
-  const dias = Math.max(1, Math.round((new Date() - new Date(uc.fecha)) / 86400000));
-  const tna = (fila.pnl_pct_usd!=null) ? fila.pnl_pct_usd/dias*365 : null;
+  const dias = diasDesdeCompra(uc.fecha);
+  // Precio de venta neto actual por unidad (valor_neto_usd ya descuenta el
+  // arancel de venta) contra el precio de compra neto por unidad (el
+  // importe neto del boleto ya incluye el arancel real que se pagó) — P&L
+  // específico de esta compra, no el promedio ponderado de toda la posición.
+  const precioVentaNetoUnitUSD = fila.cantidad ? fila.valor_neto_usd/fila.cantidad : null;
+  const pnlPctUltimaCompra = (uc.precio_unitario_usd && precioVentaNetoUnitUSD!=null)
+    ? (precioVentaNetoUnitUSD - uc.precio_unitario_usd) / uc.precio_unitario_usd * 100
+    : null;
+  const tna = (pnlPctUltimaCompra!=null) ? pnlPctUltimaCompra/dias*365 : null;
 
   let html = `<div class="mb-2"><strong>Última compra:</strong> ${fmtFechaCorta(uc.fecha)}`
-    + ` — ${fmt(uc.cantidad,2)} u. a ${uc.precio_unitario!=null?fmt(uc.precio_unitario,2):'-'} ${uc.moneda||''} c/u`
-    + ` (neto: ${fmt(uc.importe_neto,2)} ${uc.moneda||''})</div>`;
+    + ` — ${fmt(uc.cantidad,2)} u. a U$S ${uc.precio_unitario_usd!=null?fmt(uc.precio_unitario_usd,2):'-'} c/u`
+    + ` (neto: U$S ${uc.importe_neto_usd!=null?fmt(uc.importe_neto_usd,2):'-'}`
+    + `, ${fmt(uc.importe_neto,2)} ${uc.moneda||''})</div>`;
   html += `<div class="mb-2"><strong>Días desde la compra:</strong> ${dias}</div>`;
   if(fila.ventas_posteriores && fila.ventas_posteriores.length){
     html += `<div class="mb-2"><strong>Ventas parciales posteriores:</strong><ul class="mb-0">`
@@ -1367,9 +1397,12 @@ function verDetallePosicion(idComitente, idInstrumento){
   } else {
     html += `<div class="mb-2 text-muted">Sin ventas parciales posteriores a esta compra.</div>`;
   }
+  if(pnlPctUltimaCompra!=null){
+    html += `<div class="mb-2"><strong>P&amp;L % (sobre la última compra):</strong> <span class="${cls(pnlPctUltimaCompra)}">${fmtPct(pnlPctUltimaCompra)}</span></div>`;
+  }
   if(tna!=null){
-    html += `<div class="mb-0"><strong>TNA estimada (sobre la posición actual):</strong> <span class="${cls(tna)}">${fmtPct(tna)}</span>`
-      + `<div class="text-muted" style="font-size:.68rem">P&amp;L % USD actual (${fmtPct(fila.pnl_pct_usd)}) anualizado sobre ${dias} días — no es TIR, es una tasa simple.</div></div>`;
+    html += `<div class="mb-0"><strong>TNA estimada:</strong> <span class="${cls(tna)}">${fmtPct(tna)}</span>`
+      + `<div class="text-muted" style="font-size:.68rem">P&amp;L % de la última compra anualizado sobre ${dias} días — tasa simple, no es TIR.</div></div>`;
   }
   document.getElementById('detallePosicionTitulo').textContent = `${fila.ticker} — ${fila.nro_cuenta}`;
   document.getElementById('detallePosicionBody').innerHTML = html;
@@ -1413,8 +1446,7 @@ function renderTicker(ticker){
       <td class="text-end">${fmt(d.costo_usd,2)}</td>
       <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
       <td class="text-end">${pnlBadge(d.pnl_pct_usd)}</td>
-      <td class="text-end text-muted">${fmt(d.valor_ars,0)}</td>
-      <td class="text-end text-muted">${fmt(d.pnl_ars,0)}</td>
+      ${celdaDiasUltimaCompra(d)}
     </tr>`).join('');
 }
 
@@ -1555,7 +1587,7 @@ function renderAlertas(){
       <table class="table table-sm table-hover" id="${tableId}"><thead><tr>
         <th>Cuenta</th><th>Ticker</th><th>Tipo</th><th class="text-end">Cant.</th>
         <th class="text-end">Valor Neto USD</th><th class="text-end">P&L USD</th>
-        <th class="text-end">P&L % USD</th>
+        <th class="text-end">P&L % USD</th><th class="text-end">Días últ. compra</th>
       </tr></thead>
       <tbody>${rows.map(d=>`<tr>
         <td><strong>${d.nro_cuenta}</strong> <span style="font-size:.75rem;color:var(--tx)">${d.cliente.substring(0,20)}</span></td>
@@ -1564,6 +1596,7 @@ function renderAlertas(){
         <td class="text-end">${d.valor_neto_usd!=null?fmt(d.valor_neto_usd,0):'-'}</td>
         <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
         <td class="text-end">${pnlBadge(d.pnl_pct_usd)}</td>
+        ${celdaDiasUltimaCompra(d)}
       </tr>`).join('')}
       </tbody></table>
     </div>`;
