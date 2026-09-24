@@ -104,6 +104,16 @@ def get_comitentes(token: str) -> list:
     return resp.json() if isinstance(resp.json(), list) else []
 
 
+@st.cache_data(ttl=INTERVAL_S, show_spinner=False)
+def _listar_comitentes_rapido() -> list:
+    """Lista liviana de comitentes (sólo id + descripción, sin posiciones)
+    para poblar el selector de "vista rápida de una cuenta" en la pantalla
+    de elección de dashboard — cacheada para no pedir un token nuevo en
+    cada render de esa pantalla."""
+    token = obtener_token()
+    return get_comitentes(token)
+
+
 def get_posiciones(id_comitente: int, token: str) -> list:
     hoy = datetime.now().strftime("%Y-%m-%dT00:00:00.000Z")
     resp = requests.post(
@@ -319,29 +329,126 @@ def extraer_ultima_compra(boletos: list, ticker: str, token: str) -> tuple:
 # ── Fetch paralelo — GNR ───────────────────────────────────────────────────────
 
 
+def _procesar_fila_gnr(
+    r: dict, id_com: int, nro: str, nombre: str, boletos_comitente: list, token: str
+) -> dict | None:
+    """Convierte una fila cruda de posicion/listResumen en el dict de
+    posición que consume el HTML — misma lógica de arancel/costo/P&L/última
+    compra sea que venga de `fetch_gnr` (todos los comitentes) o de
+    `fetch_gnr_una_cuenta` (una sola). Devuelve None si el tipo de
+    instrumento no es Cedear/Acciones."""
+    tipo = r.get("tipoInstrumento") or r.get("instrumentoTipoDescripcion", "")
+    if tipo not in TIPOS_GNR:
+        return None
+    valor_ars = float(r.get("saldoValorizadoARS") or r.get("saldoValorizado") or 0)
+    valor_neto = round(valor_ars * ARANCEL_VENTA, 2)
+    # Cohen informa el costo de compra bruto, sin el arancel que
+    # realmente se pagó al comprar — se lo sumamos acá para que
+    # el costo (y por lo tanto el P&L) refleje lo efectivamente
+    # invertido.
+    costo_ars_bruto = float(r.get("costoTotalARS") or 0)
+    costo_usd_bruto = float(r.get("costoTotalUSD") or 0)
+    if costo_ars_bruto == 0 and costo_usd_bruto == 0:
+        # Cohen no tiene costo de compra para esta posición (típico
+        # de títulos transferidos de otro custodio o dados en
+        # garantía) — se reconstruye a partir del boleto real de
+        # compra en vez de dejar el P&L en cero.
+        id_instrumento = r.get("idInstrumento")
+        cantidad_pos = float(r.get("cantidad") or 0)
+        if id_instrumento and cantidad_pos:
+            costo_ars, costo_usd = reconstruir_costo_desde_boletos(
+                id_com, id_instrumento, cantidad_pos, token
+            )
+        else:
+            costo_ars, costo_usd = 0.0, 0.0
+    else:
+        costo_ars = round(costo_ars_bruto * ARANCEL_COMPRA, 2)
+        costo_usd = round(costo_usd_bruto * ARANCEL_COMPRA, 2)
+    # saldoValorizadoUSD viene nativo de Cohen — más preciso que
+    # convertir valor_ars con el MEP de hoy (evita una doble
+    # conversión y usa el mismo dólar que ya usa Cohen internamente
+    # para costoTotalUSD/rendimientoUSD). Pero a veces Cohen lo
+    # devuelve en 0/null puntualmente aunque costoTotalUSD y
+    # rendimientoUSD sí vengan bien — en ese caso lo reconstruimos
+    # con esos dos (costo bruto + P&L bruto de Cohen, sin arancel),
+    # que sí son confiables.
+    pnl_usd_bruto = float(r.get("rendimientoUSD") or 0)
+    valor_usd_raw = r.get("saldoValorizadoUSD")
+    valor_usd = (
+        round(float(valor_usd_raw), 2)
+        if valor_usd_raw
+        else round(costo_usd_bruto + pnl_usd_bruto, 2)
+    )
+    valor_neto_usd = round(valor_usd * ARANCEL_VENTA, 2)
+    # P&L neto: se calcula sobre el valor ya descontado el arancel
+    # de venta (valor_neto/valor_neto_usd) contra el costo de
+    # compra ya con su arancel sumado, en vez de tomar el
+    # rendimiento bruto que informa Cohen (que no contempla
+    # ninguno de los dos aranceles).
+    pnl_ars = round(valor_neto - costo_ars, 2)
+    pnl_pct_ars = round(pnl_ars / costo_ars * 100, 2) if costo_ars else 0.0
+    pnl_usd = round(valor_neto_usd - costo_usd, 2)
+    pnl_pct_usd = round(pnl_usd / costo_usd * 100, 2) if costo_usd else 0.0
+    ticker = r.get("ticker") or r.get("instrumentoSimbolo", "")
+    ultima_compra, ventas_posteriores = extraer_ultima_compra(
+        boletos_comitente, ticker, token
+    )
+    return {
+        "id_comitente": id_com,
+        "id_instrumento": r.get("idInstrumento"),
+        "nro_cuenta": nro,
+        "cliente": nombre,
+        "ticker": ticker,
+        "descripcion": r.get("denominacion") or r.get("instrumentoDescripcion", ""),
+        "tipo": tipo,
+        "moneda": r.get("moneda", ""),
+        "cantidad": float(r.get("cantidad") or 0),
+        "precio_ars": float(r.get("cotizacionARS") or r.get("cotizacion") or 0),
+        "precio_usd": float(r.get("cotizacionUSD") or 0),
+        "valor_ars": valor_ars,
+        "valor_neto": valor_neto,
+        "valor_usd": valor_usd,
+        "valor_neto_usd": valor_neto_usd,
+        "costo_ars": costo_ars,
+        "costo_usd": costo_usd,
+        "pnl_ars": pnl_ars,
+        "pnl_pct_ars": pnl_pct_ars,
+        "pnl_usd": pnl_usd,
+        "pnl_pct_usd": pnl_pct_usd,
+        "var_dia_ars": float(r.get("varDiariaARS") or 0),
+        "var_dia_pct": float(r.get("varDiariaPctARS") or 0),
+        "fecha": r.get("fechaCotizacionString") or "",
+        "ultima_compra": ultima_compra,
+        "ventas_posteriores": ventas_posteriores,
+    }
+
+
+def _boletos_para_comitente(id_com: int, rows: list, token: str) -> list:
+    ids_instrumento = sorted({
+        r.get("idInstrumento")
+        for r in rows
+        if r.get("idInstrumento")
+        and (r.get("tipoInstrumento") or r.get("instrumentoTipoDescripcion", "")) in TIPOS_GNR
+    })
+    if not ids_instrumento:
+        return []
+    # Cacheado por día (ver _boletos_comitente_del_dia) — sólo pega a
+    # Cohen la primera vez que alguien entra después de medianoche; el
+    # resto de los refrescos del día lo reutilizan sin costo.
+    hoy_str = date.today().isoformat()
+    return _boletos_comitente_del_dia(id_com, tuple(ids_instrumento), hoy_str, token)
+
+
 def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
     comitentes = get_comitentes(token)
     cmap = {c["id"]: parsear_comitente(c) for c in comitentes}
     posiciones = []
     done = 0
     total = len(comitentes)
-    hoy_str = date.today().isoformat()
 
     def fetch(c):
         rows = get_posiciones(c["id"], token)
-        ids_instrumento = sorted({
-            r.get("idInstrumento")
-            for r in rows
-            if r.get("idInstrumento")
-            and (r.get("tipoInstrumento") or r.get("instrumentoTipoDescripcion", "")) in TIPOS_GNR
-        })
-        # Cacheado por día (ver _boletos_comitente_del_dia) — sólo pega a
-        # Cohen la primera vez que alguien entra después de medianoche; el
-        # resto de los refrescos del día lo reutilizan sin costo.
-        boletos_comitente = (
-            _boletos_comitente_del_dia(c["id"], tuple(ids_instrumento), hoy_str, token)
-            if ids_instrumento else []
-        )
+        boletos_comitente = _boletos_para_comitente(c["id"], rows, token)
         return c["id"], rows, boletos_comitente
 
     with ThreadPoolExecutor(max_workers=20) as ex:
@@ -358,99 +465,32 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
                 continue
             nro, nombre = cmap.get(id_com, (str(id_com), ""))
             for r in rows:
-                tipo = r.get("tipoInstrumento") or r.get(
-                    "instrumentoTipoDescripcion", ""
-                )
-                if tipo not in TIPOS_GNR:
-                    continue
-                valor_ars = float(
-                    r.get("saldoValorizadoARS") or r.get("saldoValorizado") or 0
-                )
-                valor_neto = round(valor_ars * ARANCEL_VENTA, 2)
-                # Cohen informa el costo de compra bruto, sin el arancel que
-                # realmente se pagó al comprar — se lo sumamos acá para que
-                # el costo (y por lo tanto el P&L) refleje lo efectivamente
-                # invertido.
-                costo_ars_bruto = float(r.get("costoTotalARS") or 0)
-                costo_usd_bruto = float(r.get("costoTotalUSD") or 0)
-                if costo_ars_bruto == 0 and costo_usd_bruto == 0:
-                    # Cohen no tiene costo de compra para esta posición (típico
-                    # de títulos transferidos de otro custodio o dados en
-                    # garantía) — se reconstruye a partir del boleto real de
-                    # compra en vez de dejar el P&L en cero.
-                    id_instrumento = r.get("idInstrumento")
-                    cantidad_pos = float(r.get("cantidad") or 0)
-                    if id_instrumento and cantidad_pos:
-                        costo_ars, costo_usd = reconstruir_costo_desde_boletos(
-                            id_com, id_instrumento, cantidad_pos, token
-                        )
-                    else:
-                        costo_ars, costo_usd = 0.0, 0.0
-                else:
-                    costo_ars = round(costo_ars_bruto * ARANCEL_COMPRA, 2)
-                    costo_usd = round(costo_usd_bruto * ARANCEL_COMPRA, 2)
-                # saldoValorizadoUSD viene nativo de Cohen — más preciso que
-                # convertir valor_ars con el MEP de hoy (evita una doble
-                # conversión y usa el mismo dólar que ya usa Cohen internamente
-                # para costoTotalUSD/rendimientoUSD). Pero a veces Cohen lo
-                # devuelve en 0/null puntualmente aunque costoTotalUSD y
-                # rendimientoUSD sí vengan bien — en ese caso lo reconstruimos
-                # con esos dos (costo bruto + P&L bruto de Cohen, sin arancel),
-                # que sí son confiables.
-                pnl_usd_bruto = float(r.get("rendimientoUSD") or 0)
-                valor_usd_raw = r.get("saldoValorizadoUSD")
-                valor_usd = (
-                    round(float(valor_usd_raw), 2)
-                    if valor_usd_raw
-                    else round(costo_usd_bruto + pnl_usd_bruto, 2)
-                )
-                valor_neto_usd = round(valor_usd * ARANCEL_VENTA, 2)
-                # P&L neto: se calcula sobre el valor ya descontado el arancel
-                # de venta (valor_neto/valor_neto_usd) contra el costo de
-                # compra ya con su arancel sumado, en vez de tomar el
-                # rendimiento bruto que informa Cohen (que no contempla
-                # ninguno de los dos aranceles).
-                pnl_ars = round(valor_neto - costo_ars, 2)
-                pnl_pct_ars = round(pnl_ars / costo_ars * 100, 2) if costo_ars else 0.0
-                pnl_usd = round(valor_neto_usd - costo_usd, 2)
-                pnl_pct_usd = round(pnl_usd / costo_usd * 100, 2) if costo_usd else 0.0
-                ticker = r.get("ticker") or r.get("instrumentoSimbolo", "")
-                ultima_compra, ventas_posteriores = extraer_ultima_compra(
-                    boletos_comitente, ticker, token
-                )
-                posiciones.append(
-                    {
-                        "id_comitente": id_com,
-                        "id_instrumento": r.get("idInstrumento"),
-                        "nro_cuenta": nro,
-                        "cliente": nombre,
-                        "ticker": ticker,
-                        "descripcion": r.get("denominacion")
-                        or r.get("instrumentoDescripcion", ""),
-                        "tipo": tipo,
-                        "moneda": r.get("moneda", ""),
-                        "cantidad": float(r.get("cantidad") or 0),
-                        "precio_ars": float(
-                            r.get("cotizacionARS") or r.get("cotizacion") or 0
-                        ),
-                        "precio_usd": float(r.get("cotizacionUSD") or 0),
-                        "valor_ars": valor_ars,
-                        "valor_neto": valor_neto,
-                        "valor_usd": valor_usd,
-                        "valor_neto_usd": valor_neto_usd,
-                        "costo_ars": costo_ars,
-                        "costo_usd": costo_usd,
-                        "pnl_ars": pnl_ars,
-                        "pnl_pct_ars": pnl_pct_ars,
-                        "pnl_usd": pnl_usd,
-                        "pnl_pct_usd": pnl_pct_usd,
-                        "var_dia_ars": float(r.get("varDiariaARS") or 0),
-                        "var_dia_pct": float(r.get("varDiariaPctARS") or 0),
-                        "fecha": r.get("fechaCotizacionString") or "",
-                        "ultima_compra": ultima_compra,
-                        "ventas_posteriores": ventas_posteriores,
-                    }
-                )
+                fila = _procesar_fila_gnr(r, id_com, nro, nombre, boletos_comitente, token)
+                if fila:
+                    posiciones.append(fila)
+    return posiciones
+
+
+def fetch_gnr_una_cuenta(token: str, numero_cuenta: str) -> list:
+    """Igual que `fetch_gnr` pero para una sola cuenta (por número de cuenta
+    visible, ej. "105530") — evita recorrer los ~295 comitentes cuando sólo
+    hace falta consultar una posición puntual. Devuelve [] si no se
+    encuentra la cuenta."""
+    comitentes = get_comitentes(token)
+    id_com = next(
+        (c["id"] for c in comitentes if parsear_comitente(c)[0] == str(numero_cuenta)),
+        None,
+    )
+    if id_com is None:
+        return []
+    nro, nombre = parsear_comitente(next(c for c in comitentes if c["id"] == id_com))
+    rows = get_posiciones(id_com, token)
+    boletos_comitente = _boletos_para_comitente(id_com, rows, token)
+    posiciones = []
+    for r in rows:
+        fila = _procesar_fila_gnr(r, id_com, nro, nombre, boletos_comitente, token)
+        if fila:
+            posiciones.append(fila)
     return posiciones
 
 
@@ -1103,6 +1143,7 @@ const DATA    = __DATA_JSON__;
 const DATA_GR = __DATA_GR_JSON__;
 const MEP     = __MEP__;
 const MERCADO = __MERCADO_JSON__;
+const AUTO_TAB_CLIENTE = __AUTO_TAB_CLIENTE__;
 
 // ── Utils ──────────────────────────────────────────────────────────────────
 const fmt    = (v,d=0) => v==null?'':Number(v).toLocaleString('es-AR',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -1733,6 +1774,13 @@ buildCharts();
 buildHeatmap();
 buildGR();
 renderAlertas();
+// Vista rápida de una cuenta puntual (ver fetch_gnr_una_cuenta en Python):
+// arranca directo en "Por cliente" en vez de "Tabla completa", ya que DATA
+// sólo trae esa cuenta.
+if (AUTO_TAB_CLIENTE) {
+  const tabClienteLink = document.querySelector('a[href="#tab-cliente"]');
+  if (tabClienteLink) new bootstrap.Tab(tabClienteLink).show();
+}
 </script>
 </body>
 </html>"""
@@ -1744,7 +1792,7 @@ def _js_safe(data) -> str:
 
 def generar_html(
     posiciones: list, gr: list, mep: float, ts: str, user_name: str = "",
-    mercado_result: dict | None = None,
+    mercado_result: dict | None = None, auto_tab_cliente: bool = False,
 ) -> str:
     return (
         HTML_TEMPLATE.replace("__DATA_JSON__", _js_safe(posiciones))
@@ -1755,6 +1803,7 @@ def generar_html(
         .replace("__INTERVAL_S__", str(INTERVAL_S))
         .replace("__USER_NAME__", user_name)
         .replace("__MERCADO_JSON__", _js_safe(mercado_result))
+        .replace("__AUTO_TAB_CLIENTE__", "true" if auto_tab_cliente else "false")
     )
 
 
@@ -1888,6 +1937,33 @@ if st.session_state["pagina"] is None:
         if st.button("💸 Transferencias", use_container_width=True, type="primary"):
             st.session_state["pagina"] = "Transferencias"
             st.rerun()
+
+    st.divider()
+    st.caption(
+        "¿Sólo necesitás ver la posición de Cedear/Acciones de una cuenta "
+        "puntual? Elegila acá — carga sólo esa cuenta, no las ~300 del "
+        "dashboard completo."
+    )
+    try:
+        comitentes_rapido = _listar_comitentes_rapido()
+    except Exception:
+        comitentes_rapido = []
+    opciones_rapido = {c["desc"]: parsear_comitente(c)[0] for c in comitentes_rapido}
+    col3, col4 = st.columns([3, 1])
+    with col3:
+        cuenta_elegida = st.selectbox(
+            "Cuenta comitente", options=[""] + sorted(opciones_rapido.keys()),
+            index=0, label_visibility="collapsed",
+            placeholder="Buscar cuenta por número o nombre...",
+        )
+    with col4:
+        if st.button(
+            "🔎 Ver posición", use_container_width=True, disabled=not cuenta_elegida
+        ):
+            st.session_state["pagina"] = "CEDEAR / GNR"
+            st.session_state["cuenta_rapida"] = opciones_rapido[cuenta_elegida]
+            st.rerun()
+
     st.button("Cerrar sesión", on_click=st.logout)
     st.stop()
 
@@ -1901,6 +1977,7 @@ with nav1:
         type="primary" if pagina == "CEDEAR / GNR" else "secondary",
     ):
         st.session_state["pagina"] = "CEDEAR / GNR"
+        st.session_state.pop("cuenta_rapida", None)
         st.rerun()
 with nav2:
     if st.button(
@@ -1915,7 +1992,32 @@ with nav4:
 st.caption(f"👤 {user_name}")
 
 # ── CEDEAR / GNR ─────────────────────────────────────────────────────────────
-if pagina == "CEDEAR / GNR":
+if pagina == "CEDEAR / GNR" and st.session_state.get("cuenta_rapida"):
+    cuenta_rapida = st.session_state["cuenta_rapida"]
+    if st.button("← Volver al dashboard completo"):
+        del st.session_state["cuenta_rapida"]
+        st.rerun()
+    st.caption(
+        f"Vista rápida de la cuenta {cuenta_rapida} — no carga el resto de la "
+        "cartera ni Ganancia Realizada/Mercado."
+    )
+    try:
+        token_rapido = obtener_token()
+        mep_rapido = get_mep(token_rapido)
+        gnr_rapido = fetch_gnr_una_cuenta(token_rapido, cuenta_rapida)
+    except Exception as e:
+        st.error(f"❌ Error al conectar con la API de Cohen: {e}")
+        st.stop()
+    if not gnr_rapido:
+        st.warning(f"No se encontraron posiciones de Cedear/Acciones para la cuenta {cuenta_rapida}.")
+        st.stop()
+    ts_rapido = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    html_content = generar_html(
+        gnr_rapido, [], mep_rapido, ts_rapido, user_name, None, auto_tab_cliente=True
+    )
+    st.components.v1.html(html_content, height=900, scrolling=True)
+
+elif pagina == "CEDEAR / GNR":
     try:
         gnr, gr, mep, ts = cargar_datos()
     except Exception as e:
