@@ -180,28 +180,42 @@ def get_boletos_comitente(id_comitente: int, ids_instrumento: list, token: str) 
 def reconstruir_costo_desde_boletos(
     id_comitente: int, id_instrumento: int, cantidad_actual: float, token: str
 ) -> tuple:
-    """Cuando Cohen no informa costoTotalARS/USD (posiciones transferidas o
-    dadas en garantía sin compra registrada en la cuenta), se reconstruye a
-    partir de los boletos de Compra reales: para cada boleto se usa el
-    importe *neto* (ya incluye comisión/derechos de mercado/IVA de esa
-    operación puntual — más preciso que aplicarle nuestro ARANCEL_PCT
-    estimado), convertido a ARS/USD con el MEP del día exacto en que se
-    concertó si vino en pesos. Promedia el costo unitario de todas las
-    compras encontradas y lo escala a la cantidad que se tiene hoy (cubre el
-    caso de ventas parciales sin necesidad de reconstruir todo el historial
-    lote por lote). Devuelve (0.0, 0.0) si no se encuentra nada.
+    """Cuando Cohen no informa costoTotalARS/USD (posiciones transferidas,
+    dadas en garantía, o recién compradas y todavía sin liquidar — ver el
+    caso real de la cuenta 107115 / ticker C, comprado el 21/9 y con
+    costoTotalARS=0 mientras está en garantía de settlement), se reconstruye
+    a partir de los boletos de Compra reales, recorridos del más reciente al
+    más antiguo: si el boleto de Compra más reciente ya cubre la cantidad
+    actual de la posición (caso típico: la tenencia es enteramente ese
+    último lote), se usa sólo ese boleto; si tiene menos cantidad de la que
+    hay hoy, se sigue retrocediendo y sumando boletos de Compra anteriores
+    hasta cubrir la cantidad actual. Esto evita mezclar en el costo compras
+    ya vendidas por completo hace tiempo (ciclos de compra/venta cerrados
+    anteriores a la tenencia actual), que promediarlas con las vigentes
+    distorsiona el costo real.
+    Para cada boleto se usa el importe *neto* (ya incluye comisión/derechos
+    de mercado/IVA de esa operación puntual — no hay que volver a sumarle el
+    ARANCEL_PCT estimado), convertido a ARS/USD con el MEP del día exacto en
+    que se concertó si vino en pesos. Devuelve (0.0, 0.0) si no se encuentra
+    ningún boleto de Compra.
     """
     try:
         boletos = get_boletos_comitente(id_comitente, [id_instrumento], token)
     except Exception:
         return 0.0, 0.0
 
+    compras = sorted(
+        (b for b in boletos if b.get("tipoDeOperacion") == "Compra"),
+        key=lambda b: b.get("fechaConcertacion") or "",
+        reverse=True,
+    )
+
     total_cantidad = 0.0
     total_ars = 0.0
     total_usd = 0.0
-    for b in boletos:
-        if b.get("tipoDeOperacion") != "Compra":
-            continue
+    for b in compras:
+        if total_cantidad >= cantidad_actual:
+            break
         cantidad = float(b.get("cantidadDelBoleto") or 0)
         neto = float(b.get("importeNeto") or 0)
         if cantidad <= 0 or neto <= 0:
@@ -348,6 +362,14 @@ def _procesar_fila_gnr(
     # invertido.
     costo_ars_bruto = float(r.get("costoTotalARS") or 0)
     costo_usd_bruto = float(r.get("costoTotalUSD") or 0)
+    # costo_fuente distingue de dónde sale costo_ars/costo_usd, para que el
+    # HTML pueda avisar cuándo el P&L no viene del costo real de Cohen:
+    # "cohen" = costoTotalARS/USD informado por Cohen (el caso normal);
+    # "boletos" = reconstruido a partir de boletos de Compra reales (ver
+    # reconstruir_costo_desde_boletos) — buena estimación, pero no es el
+    # dato de Cohen; "sin_datos" = ni Cohen ni los boletos tienen costo
+    # (típico de transferencias sin boleto de compra en esta cuenta), cae en
+    # costo=0 y por lo tanto el P&L queda inflado a ~100% — no confiable.
     if costo_ars_bruto == 0 and costo_usd_bruto == 0:
         # Cohen no tiene costo de compra para esta posición (típico
         # de títulos transferidos de otro custodio o dados en
@@ -361,9 +383,11 @@ def _procesar_fila_gnr(
             )
         else:
             costo_ars, costo_usd = 0.0, 0.0
+        costo_fuente = "boletos" if (costo_ars or costo_usd) else "sin_datos"
     else:
         costo_ars = round(costo_ars_bruto * ARANCEL_COMPRA, 2)
         costo_usd = round(costo_usd_bruto * ARANCEL_COMPRA, 2)
+        costo_fuente = "cohen"
     # saldoValorizadoUSD viene nativo de Cohen — más preciso que
     # convertir valor_ars con el MEP de hoy (evita una doble
     # conversión y usa el mismo dólar que ya usa Cohen internamente
@@ -411,6 +435,7 @@ def _procesar_fila_gnr(
         "valor_neto_usd": valor_neto_usd,
         "costo_ars": costo_ars,
         "costo_usd": costo_usd,
+        "costo_fuente": costo_fuente,
         "pnl_ars": pnl_ars,
         "pnl_pct_ars": pnl_pct_ars,
         "pnl_usd": pnl_usd,
@@ -759,6 +784,9 @@ body{
 .kpi-label{font-size:.72rem;color:var(--mu);text-transform:uppercase;letter-spacing:.05em}
 .gain{color:var(--ok)!important}.loss{color:var(--bad)!important}
 .badge-gain{background:var(--ok-bg);color:var(--ok)}.badge-loss{background:var(--bad-bg);color:var(--bad)}
+/* costo_fuente != "cohen": costo reconstruido (no es el dato real de Cohen) */
+.costo-boletos{background:var(--warn-bg)!important;color:var(--warn)!important;font-weight:600}
+.costo-sin-datos{background:var(--bad-bg)!important;color:var(--bad)!important;font-weight:600}
 .table{--bs-table-bg:var(--sur);--bs-table-color:var(--tx);--bs-table-striped-bg:var(--sur2);
   --bs-table-hover-bg:var(--sur2);--bs-table-hover-color:var(--tx);--bs-table-border-color:var(--bo)}
 .table-wrapper{max-height:520px;overflow-y:auto}
@@ -1150,6 +1178,14 @@ const fmt    = (v,d=0) => v==null?'':Number(v).toLocaleString('es-AR',{minimumFr
 const fmtPct = v => v==null?'':(v>=0?'+':'')+Number(v).toFixed(2)+'%';
 const cls    = v => v>=0?'gain':'loss';
 function pnlBadge(v){const c=v>=0?'badge-gain':'badge-loss';return `<span class="badge ${c}">${fmtPct(v)}</span>`;}
+// Celda de costo_usd: si costo_fuente no es "cohen" el costo no sale del
+// dato real de Cohen sino que se reconstruyó (ver reconstruir_costo_desde_boletos
+// en el backend) — se pinta para no confundirlo con un costo confirmado.
+function celdaCosto(d){
+  if(d.costo_fuente==='sin_datos') return `<td class="text-end costo-sin-datos" title="Sin costo de compra: ni Cohen ni los boletos de esta cuenta tienen registro de compra (típico de una transferencia). El P&amp;L mostrado no es confiable.">${fmt(d.costo_usd,2)} ⚠</td>`;
+  if(d.costo_fuente==='boletos') return `<td class="text-end costo-boletos" title="Costo estimado a partir del boleto de compra real (Cohen no informa costo para esta posición, típico de transferencias).">${fmt(d.costo_usd,2)} ~</td>`;
+  return `<td class="text-end">${fmt(d.costo_usd,2)}</td>`;
+}
 
 // ── KPIs ───────────────────────────────────────────────────────────────────
 function renderKPIs(){
@@ -1203,7 +1239,7 @@ function renderMainRows(rows){
       <td class="text-end">${fmt(d.precio_usd,2)}</td>
       <td class="text-end">${fmt(d.valor_usd,2)}</td>
       <td class="text-end text-primary">${fmt(d.valor_neto_usd,2)}</td>
-      <td class="text-end">${fmt(d.costo_usd,2)}</td>
+      ${celdaCosto(d)}
       <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
       <td class="text-end">${pnlBadge(d.pnl_pct_usd)}</td>
       ${celdaDiasUltimaCompra(d)}
@@ -1268,7 +1304,7 @@ function renderPerformance(){
   const asegurar = (k, cliente) => {
     if(!porCliente[k]) porCliente[k]={
       nro_cuenta:k, cliente, gr_usd:0, gr_ars:0, pnl_usd:0, pnl_ars:0,
-      costo_usd:0, costo_ars:0, valor_usd:0,
+      costo_usd:0, costo_ars:0, valor_usd:0, costo_no_confiable:false,
     };
     return porCliente[k];
   };
@@ -1279,6 +1315,10 @@ function renderPerformance(){
     p.costo_usd += d.costo_usd||0;
     p.costo_ars += d.costo_ars||0;
     p.valor_usd += d.valor_usd||0;
+    // El total del cliente mezcla posiciones de distinto origen de costo —
+    // no se puede pintar por completo, pero se avisa si alguna posición
+    // tiene costo reconstruido/faltante (ver celdaCosto).
+    if(d.costo_fuente!=='cohen') p.costo_no_confiable=true;
   });
   DATA_GR.forEach(d=>{
     if(desde && d.fecha < desde) return;
@@ -1300,7 +1340,7 @@ function renderPerformance(){
       <td class="text-end ${cls(p.gr_usd)}">${fmt(p.gr_usd,2)}</td>
       <td class="text-end ${cls(p.pnl_usd)}">${fmt(p.pnl_usd,2)}</td>
       <td class="text-end ${cls(p.resultado_total_usd)}">${fmt(p.resultado_total_usd,2)}</td>
-      <td class="text-end">${fmt(p.costo_usd,2)}</td>
+      <td class="text-end${p.costo_no_confiable?' costo-boletos':''}"${p.costo_no_confiable?' title="Incluye al menos una posición con costo reconstruido a partir de boletos o sin datos de costo — ver detalle por cliente."':''}>${fmt(p.costo_usd,2)}${p.costo_no_confiable?' ~':''}</td>
       <td class="text-end text-primary">${fmt(p.valor_usd,2)}</td>
       <td class="text-end">${p.performance_pct!=null?pnlBadge(p.performance_pct):'—'}</td>
       <td class="text-end text-muted">${fmt(p.resultado_total_ars)}</td>
@@ -1380,7 +1420,7 @@ function renderCliente(nro){
       <td class="text-end">${fmt(d.precio_usd,2)}</td>
       <td class="text-end">${fmt(d.valor_usd,2)}</td>
       <td class="text-end text-primary">${fmt(d.valor_neto_usd,2)}</td>
-      <td class="text-end">${fmt(d.costo_usd,2)}</td>
+      ${celdaCosto(d)}
       <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
       <td class="text-end">${pnlBadge(d.pnl_pct_usd)}</td>
       ${celdaDiasUltimaCompra(d)}
@@ -1484,7 +1524,7 @@ function renderTicker(ticker){
       <td class="text-end">${fmt(d.precio_usd,2)}</td>
       <td class="text-end">${fmt(d.valor_usd,2)}</td>
       <td class="text-end text-primary">${fmt(d.valor_neto_usd,2)}</td>
-      <td class="text-end">${fmt(d.costo_usd,2)}</td>
+      ${celdaCosto(d)}
       <td class="text-end ${cls(d.pnl_usd)}">${fmt(d.pnl_usd,2)}</td>
       <td class="text-end">${pnlBadge(d.pnl_pct_usd)}</td>
       ${celdaDiasUltimaCompra(d)}
