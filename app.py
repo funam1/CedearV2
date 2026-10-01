@@ -26,6 +26,7 @@ ARANCEL_PCT = 0.0127  # 1.27% arancel de Cohen, aplica a compra y venta (medido
 ARANCEL_VENTA = 1 - ARANCEL_PCT  # descuenta el arancel del precio de venta
 ARANCEL_COMPRA = 1 + ARANCEL_PCT  # suma el arancel al costo de compra
 INTERVAL_S = 30 * 60  # 30 minutos
+SESSION_MAX_S = 12 * 60 * 60  # 12 horas: después se fuerza el logout
 
 EMAILS_AUTORIZADOS = [
     "federico@qtmcapital.com.ar",
@@ -820,8 +821,6 @@ body[data-t="dark"] .btn-close{filter:invert(1) grayscale(100%) brightness(200%)
 .autocomplete-item:hover,.autocomplete-item.active{background:var(--sur2)}
 .copy-btn{font-size:.72rem;padding:2px 8px}
 input[type=checkbox]{width:15px;height:15px;cursor:pointer}
-.btn-logout{font-size:.7rem;padding:2px 10px;border-radius:6px;background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.3);cursor:pointer;transition:background .15s}
-.btn-logout:hover{background:rgba(255,255,255,.28)}
 </style>
 </head>
 <body data-t="dark">
@@ -838,7 +837,6 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
       &nbsp;
       <button class="ibtn" id="btnForceRefresh" title="Forzar actualización (abre en pestaña nueva)" onclick="window.open('/?force_refresh=1','_blank')">&#8635;</button>
       <button class="ibtn" id="btnTheme" title="Modo claro/oscuro">&#9789;</button>
-      <button class="btn-logout" title="Abre el logout en pestaña nueva" onclick="window.open('/_stcore/logout','_blank')">Salir</button>
     </span>
   </div>
 </nav>
@@ -1928,6 +1926,19 @@ def check_auth() -> bool:
 
 
 if not check_auth():
+    st.stop()
+
+# ── Sesión de máximo 12 horas ─────────────────────────────────────────────────
+# La cookie de login de Streamlit dura mucho más que eso, así que el logout se
+# fuerza a mano. Se mide desde `iat` (hora de emisión del id_token de Google, que
+# Streamlit guarda en la cookie junto con el resto de los claims) para que el
+# límite sobreviva a recargas de página y a cerrar/abrir el navegador; si el
+# claim faltara, cae al inicio de la sesión de Streamlit.
+login_ts = st.user.get("iat") or st.session_state.setdefault(
+    "session_start", time.time()
+)
+if time.time() - float(login_ts) > SESSION_MAX_S:
+    st.logout()
     st.stop()
 
 # El botón ↻ del navbar del dashboard CEDEAR/GNR abre esta misma URL en una
