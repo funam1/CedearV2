@@ -25,8 +25,16 @@ ARANCEL_PCT = 0.0127  # 1.27% arancel de Cohen, aplica a compra y venta (medido
 # existe un endpoint de arancel por cliente en la API — se aplica parejo.
 ARANCEL_VENTA = 1 - ARANCEL_PCT  # descuenta el arancel del precio de venta
 ARANCEL_COMPRA = 1 + ARANCEL_PCT  # suma el arancel al costo de compra
-INTERVAL_S = 30 * 60  # 30 minutos
+INTERVAL_S = 30 * 60  # 30 minutos — cadencia de Ganancia Realizada y de la lista de comitentes
 SESSION_MAX_S = 12 * 60 * 60  # 12 horas: después se fuerza el logout
+# Cadencia de refresco de precios de Acciones/Cedear (ver cargar_gnr): mucho
+# más barata que un refresco completo porque sólo pide 2 veces el precio de
+# pizarra de TODOS los instrumentos (api/operacionMercado/getListOperacionMercado
+# por ACCION/CEDEAR) en vez de la posición completa de las ~295 cuentas — la
+# cartera en sí (cantidades/costos/última compra) se resincroniza 1 vez por
+# día en _cargar_base_gnr_del_dia, ya que eso cambia mucho menos seguido que
+# el precio.
+PRECIO_REFRESH_S = 15 * 60  # 15 minutos
 
 EMAILS_AUTORIZADOS = [
     "federico@qtmcapital.com.ar",
@@ -87,9 +95,124 @@ def get_mep(token: str, fecha: str | None = None) -> float:
 def mep_historico(fecha: str, _token: str) -> float:
     """MEP de una fecha pasada — se cachea sin vencimiento porque un valor
     histórico ya cerrado no cambia nunca (a diferencia del MEP de hoy, que sí
-    se recacha cada INTERVAL_S vía cargar_datos). Compartido por todos los
-    usuarios y por toda la vida del proceso, no sólo dentro de un fetch_gnr."""
+    se recacha cada PRECIO_REFRESH_S vía cargar_gnr/_cargar_precios_mercado).
+    Compartido por todos los usuarios y por toda la vida del proceso, no
+    sólo dentro de un fetch_gnr."""
     return get_mep(_token, fecha)
+
+
+def get_cotizaciones_mercado(tipo_instrumento: str, token: str) -> list:
+    """POST api/operacionMercado/getListOperacionMercado — precio de pizarra
+    del día y variación % de TODOS los instrumentos de un tipo (ACCION,
+    CEDEAR, ON, BONO, ...) en una sola llamada, en vez de pedir la posición
+    completa de cada cuenta sólo para sacar su precio. Cada especie trae
+    además `instrumentoGrupo`, la lista de sus variantes en otras monedas
+    (campo `moneda`: 0 pesos, 1 dólar MEP, 2 dólar cable) — esas variantes
+    ya vienen como entradas propias de la MISMA lista (ej. "AAL" en pesos y
+    "AALD" en dólar MEP conviven en el mismo pedido de tipo CEDEAR)."""
+    resp = requests.post(
+        f"{COHEN_BASE}/api/operacionMercado/getListOperacionMercado",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        json={"skip": 0, "take": 2000, "order": [], "InstrumentoTipoCodigo": tipo_instrumento},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json().get("data", [])
+
+
+MONEDA_GRUPO_DOLAR_MEP = 1  # dentro de instrumentoGrupo: 0 pesos, 1 dólar MEP, 2 dólar cable
+
+
+def _precio_usd_de_item(item: dict, mapa: dict, mep: float) -> float:
+    """Precio en USD de un item de get_cotizaciones_mercado: usa la
+    variante en dólar MEP si existe en `instrumentoGrupo` (mismo
+    instrumento, otra especie — ya vino en el mismo pedido masivo, no hace
+    falta una llamada aparte). Si no tiene variante en dólares (típico de
+    acciones argentinas sin ADR), cae a dividir el precio en pesos por el
+    MEP de hoy — mismo fallback que ya usaba el dashboard antes de esto
+    para instrumentos sin cotizacionUSD nativa de Cohen."""
+    for variante in item.get("instrumentoGrupo") or []:
+        if variante.get("moneda") == MONEDA_GRUPO_DOLAR_MEP:
+            otro = mapa.get(variante.get("simbolo"))
+            precio = float(otro.get("precioUltimo") or 0) if otro else 0.0
+            if precio:
+                return precio
+            break
+    precio_ars = float(item.get("precioUltimo") or 0)
+    return round(precio_ars / mep, 4) if mep else 0.0
+
+
+@st.cache_data(ttl=PRECIO_REFRESH_S, show_spinner=False)
+def _cargar_precios_mercado(_token: str) -> tuple:
+    """Precio (pesos y dólares) y variación % del día de TODAS las
+    Acciones/Cedear en sólo 2 llamadas, cacheado PRECIO_REFRESH_S — la
+    cadencia real de "en vivo" del dashboard. Lo pesado (cantidades/costos
+    de las ~295 cuentas) vive en `_cargar_base_gnr_del_dia`, cacheado por
+    día; `cargar_gnr` combina ambos."""
+    mep = get_mep(_token)
+    items = get_cotizaciones_mercado("ACCION", _token) + get_cotizaciones_mercado("CEDEAR", _token)
+    mapa = {it["ticker"]: it for it in items if it.get("ticker")}
+    precios = {}
+    for ticker, item in mapa.items():
+        precios[ticker] = {
+            "precio_ars": float(item.get("precioUltimo") or 0),
+            "precio_usd": _precio_usd_de_item(item, mapa, mep),
+            "var_dia_pct": float(item.get("variacionPorcentaje") or 0),
+            "var_dia_ars_unitario": float(item.get("variacion") or 0),
+        }
+    return precios, mep
+
+
+def _combinar_precio_gnr(base: dict, precios: dict) -> dict:
+    """Recalcula valor/P&L de una posición "base" (cantidad/costo ya
+    conocidos, cacheados por día en `_cargar_base_gnr_del_dia`) con el
+    precio fresco de `precios` (cacheado cada PRECIO_REFRESH_S en
+    `_cargar_precios_mercado`) — evita volver a pedir la posición completa
+    de la cuenta sólo para actualizar el precio. Misma fórmula de
+    arancel/P&L que `_procesar_fila_gnr`."""
+    info = precios.get(base["ticker"])
+    cantidad = base["cantidad"]
+    costo_ars = base["costo_ars"]
+    costo_usd = base["costo_usd"]
+    if info:
+        precio_ars = info["precio_ars"]
+        precio_usd = info["precio_usd"]
+        var_dia_pct = info["var_dia_pct"]
+        var_dia_ars = round(info["var_dia_ars_unitario"] * cantidad, 2)
+    else:
+        # Instrumento sin cotización en el pedido masivo (puede pasar con
+        # algo muy ilíquido que no aparece en el panel de pizarra) — se
+        # deja en 0 en vez de inventar un precio.
+        precio_ars = precio_usd = var_dia_pct = var_dia_ars = 0.0
+
+    valor_ars = round(cantidad * precio_ars, 2)
+    valor_neto = round(valor_ars * ARANCEL_VENTA, 2)
+    valor_usd = round(cantidad * precio_usd, 2)
+    valor_neto_usd = round(valor_usd * ARANCEL_VENTA, 2)
+    pnl_ars = round(valor_neto - costo_ars, 2)
+    pnl_pct_ars = round(pnl_ars / costo_ars * 100, 2) if costo_ars else 0.0
+    pnl_usd = round(valor_neto_usd - costo_usd, 2)
+    pnl_pct_usd = round(pnl_usd / costo_usd * 100, 2) if costo_usd else 0.0
+
+    return {
+        **base,
+        "precio_ars": precio_ars,
+        "precio_usd": precio_usd,
+        "valor_ars": valor_ars,
+        "valor_neto": valor_neto,
+        "valor_usd": valor_usd,
+        "valor_neto_usd": valor_neto_usd,
+        "pnl_ars": pnl_ars,
+        "pnl_pct_ars": pnl_pct_ars,
+        "pnl_usd": pnl_usd,
+        "pnl_pct_usd": pnl_pct_usd,
+        "var_dia_ars": var_dia_ars,
+        "var_dia_pct": var_dia_pct,
+    }
 
 
 # ── API helpers ────────────────────────────────────────────────────────────────
@@ -282,14 +405,14 @@ def _boletos_comitente_del_dia(
 ) -> list:
     """Boletos de una cuenta para "última compra + ventas posteriores" (ver
     extraer_ultima_compra). Cacheado por día — dentro del mismo día no hace
-    falta repetir esta consulta en cada refresco de 30 minutos, ya que las
-    compras/ventas pasadas no cambian retroactivamente. `hoy` entra en la
-    clave de caché para invalidar a la medianoche, e `ids_instrumento` para
-    invalidar sólo esta cuenta puntual si compra un activo nuevo que todavía
-    no estaba cubierto (Streamlit trata cada combinación de argumentos como
-    una entrada de caché distinta). `_token` lleva guión bajo a propósito:
-    Streamlit no lo usa para la clave de caché (cambia en cada refresco de
-    cargar_datos), sólo lo necesita la llamada real a la API.
+    falta repetir esta consulta en cada sync, ya que las compras/ventas
+    pasadas no cambian retroactivamente. `hoy` entra en la clave de caché
+    para invalidar a la medianoche, e `ids_instrumento` para invalidar sólo
+    esta cuenta puntual si compra un activo nuevo que todavía no estaba
+    cubierto (Streamlit trata cada combinación de argumentos como una
+    entrada de caché distinta). `_token` lleva guión bajo a propósito:
+    Streamlit no lo usa para la clave de caché (cambia en cada llamada),
+    sólo lo necesita la llamada real a la API.
     """
     return get_boletos_comitente(id_comitente, list(ids_instrumento), _token)
 
@@ -449,6 +572,59 @@ def _procesar_fila_gnr(
     }
 
 
+def _procesar_fila_gnr_base(
+    r: dict, id_com: int, nro: str, nombre: str, boletos_comitente: list, token: str
+) -> dict | None:
+    """Igual que `_procesar_fila_gnr`, pero SIN los campos que dependen del
+    precio del día (precio_ars/usd, valor_*, pnl_*) — para el sync diario
+    de cantidades/costos (ver `cargar_gnr`/`_cargar_base_gnr_del_dia`), que
+    se recombina con el precio fresco cada PRECIO_REFRESH_S en
+    `_combinar_precio_gnr` en vez de volver a pedir la posición completa de
+    la cuenta sólo para actualizar el precio."""
+    tipo = r.get("tipoInstrumento") or r.get("instrumentoTipoDescripcion", "")
+    if tipo not in TIPOS_GNR:
+        return None
+    # Mismo criterio de costo que `_procesar_fila_gnr` (ver ahí el detalle
+    # de costo_fuente) — esto no depende del precio, así que sí tiene
+    # sentido cachearlo por día.
+    costo_ars_bruto = float(r.get("costoTotalARS") or 0)
+    costo_usd_bruto = float(r.get("costoTotalUSD") or 0)
+    if costo_ars_bruto == 0 and costo_usd_bruto == 0:
+        id_instrumento = r.get("idInstrumento")
+        cantidad_pos = float(r.get("cantidad") or 0)
+        if id_instrumento and cantidad_pos:
+            costo_ars, costo_usd = reconstruir_costo_desde_boletos(
+                id_com, id_instrumento, cantidad_pos, token
+            )
+        else:
+            costo_ars, costo_usd = 0.0, 0.0
+        costo_fuente = "boletos" if (costo_ars or costo_usd) else "sin_datos"
+    else:
+        costo_ars = round(costo_ars_bruto * ARANCEL_COMPRA, 2)
+        costo_usd = round(costo_usd_bruto * ARANCEL_COMPRA, 2)
+        costo_fuente = "cohen"
+    ticker = r.get("ticker") or r.get("instrumentoSimbolo", "")
+    ultima_compra, ventas_posteriores = extraer_ultima_compra(
+        boletos_comitente, ticker, token
+    )
+    return {
+        "id_comitente": id_com,
+        "id_instrumento": r.get("idInstrumento"),
+        "nro_cuenta": nro,
+        "cliente": nombre,
+        "ticker": ticker,
+        "descripcion": r.get("denominacion") or r.get("instrumentoDescripcion", ""),
+        "tipo": tipo,
+        "moneda": r.get("moneda", ""),
+        "cantidad": float(r.get("cantidad") or 0),
+        "costo_ars": costo_ars,
+        "costo_usd": costo_usd,
+        "costo_fuente": costo_fuente,
+        "ultima_compra": ultima_compra,
+        "ventas_posteriores": ventas_posteriores,
+    }
+
+
 def _boletos_para_comitente(id_com: int, rows: list, token: str) -> list:
     ids_instrumento = sorted({
         r.get("idInstrumento")
@@ -492,6 +668,44 @@ def fetch_gnr(token: str, mep: float, progress_bar=None) -> list:
             nro, nombre = cmap.get(id_com, (str(id_com), ""))
             for r in rows:
                 fila = _procesar_fila_gnr(r, id_com, nro, nombre, boletos_comitente, token)
+                if fila:
+                    posiciones.append(fila)
+    return posiciones
+
+
+def fetch_gnr_base(token: str, progress_bar=None) -> list:
+    """Igual que `fetch_gnr`, pero sin pedir el precio del día — usa
+    `_procesar_fila_gnr_base` (cantidades/costos/última compra, sin
+    precio/valor/P&L) en vez de `_procesar_fila_gnr`. Es el fetch "pesado"
+    (recorre las ~295 cuentas) que `cargar_gnr` cachea 1 vez por día; el
+    precio se recombina por separado cada PRECIO_REFRESH_S, ver
+    `_combinar_precio_gnr`."""
+    comitentes = get_comitentes(token)
+    cmap = {c["id"]: parsear_comitente(c) for c in comitentes}
+    posiciones = []
+    done = 0
+    total = len(comitentes)
+
+    def fetch(c):
+        rows = get_posiciones(c["id"], token)
+        boletos_comitente = _boletos_para_comitente(c["id"], rows, token)
+        return c["id"], rows, boletos_comitente
+
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        futuros = {ex.submit(fetch, c): c for c in comitentes}
+        for fut in as_completed(futuros):
+            done += 1
+            if progress_bar is not None:
+                progress_bar.progress(
+                    done / total, text=f"GNR (sync diario): {done}/{total} comitentes"
+                )
+            try:
+                id_com, rows, boletos_comitente = fut.result()
+            except Exception:
+                continue
+            nro, nombre = cmap.get(id_com, (str(id_com), ""))
+            for r in rows:
+                fila = _procesar_fila_gnr_base(r, id_com, nro, nombre, boletos_comitente, token)
                 if fila:
                     posiciones.append(fila)
     return posiciones
@@ -605,43 +819,61 @@ def fetch_gr(token: str, mep: float, progress_bar=None) -> list:
 # ── Carga de datos con caché ───────────────────────────────────────────────────
 
 
-@st.cache_data(ttl=INTERVAL_S, show_spinner=False)
-def cargar_datos():
-    """Obtiene token, MEP, GNR y GR.
-
-    Cacheado a nivel de proceso (no de sesión): el primer usuario que entra
-    después de que venza el TTL dispara el fetch real; todos los que entran
-    mientras tanto reciben el mismo resultado cacheado sin volver a pegarle
-    a la API de Cohen. show_spinner=False porque el feedback de progreso
-    (status/progress bars) sólo tiene sentido durante el fetch real, nunca
-    en un cache-hit.
-    """
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _cargar_base_gnr_del_dia(hoy_str: str, _token: str):
+    """Sync "pesado" de GNR (recorre las ~295 cuentas) — cacheado por día,
+    igual criterio que `_boletos_comitente_del_dia`: `hoy_str` entra en la
+    clave de caché para invalidar a la medianoche. Las cantidades/costos/
+    última compra no cambian tan seguido como el precio, así que no hace
+    falta repetir este fetch completo en cada refresco de
+    PRECIO_REFRESH_S — ver `cargar_gnr`, que lo recombina con el precio
+    fresco."""
     status_container = st.empty()
     with status_container.status(
-        "⏳ Cargando datos desde Cohen...", expanded=True
+        "⏳ Sincronizando cartera (cantidades/costos) con Cohen...", expanded=True
     ) as s:
-        st.write("🔐 Obteniendo token...")
-        token = obtener_token()
-
-        st.write("💵 Obteniendo cotización MEP...")
-        mep = get_mep(token)
-
-        st.write("📈 Descargando posiciones (GNR)...")
-        pb1 = st.progress(0, text="Iniciando GNR...")
-        gnr = fetch_gnr(token, mep, pb1)
-        pb1.empty()
-
-        st.write("✅ Descargando Ganancia Realizada...")
-        pb2 = st.progress(0, text="Iniciando GR...")
-        gr = fetch_gr(token, mep, pb2)
-        pb2.empty()
-
-        s.update(label="✅ Datos cargados", state="complete", expanded=False)
-
+        pb = st.progress(0, text="Iniciando GNR...")
+        base = fetch_gnr_base(_token, pb)
+        pb.empty()
+        s.update(label="✅ Cartera sincronizada", state="complete", expanded=False)
     status_container.empty()
+    return base
 
+
+@st.cache_data(ttl=PRECIO_REFRESH_S, show_spinner=False)
+def cargar_gnr():
+    """GNR recombinando la base diaria (`_cargar_base_gnr_del_dia`:
+    cantidades/costos/última compra, 1 vez por día) con el precio fresco
+    (`_cargar_precios_mercado`: 2 llamadas para TODAS las Acciones/Cedear,
+    cada PRECIO_REFRESH_S) — evita pedir la posición completa de las ~295
+    cuentas sólo para actualizar el precio. Devuelve (gnr, mep, ts)."""
+    token = obtener_token()
+    hoy_str = date.today().isoformat()
+    base = _cargar_base_gnr_del_dia(hoy_str, token)
+    precios, mep = _cargar_precios_mercado(token)
+    gnr = [_combinar_precio_gnr(b, precios) for b in base]
     ts = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    return gnr, gr, mep, ts
+    return gnr, mep, ts
+
+
+@st.cache_data(ttl=INTERVAL_S, show_spinner=False)
+def cargar_gr():
+    """Ganancia Realizada — cacheado a nivel de proceso cada INTERVAL_S (30
+    minutos), sin cambios respecto a antes: a diferencia de GNR, acá no
+    hay un "precio" que separar, así que no tiene el mismo beneficio de
+    partirlo en dos cachés."""
+    status_container = st.empty()
+    with status_container.status(
+        "⏳ Descargando Ganancia Realizada...", expanded=True
+    ) as s:
+        token = obtener_token()
+        mep = get_mep(token)
+        pb = st.progress(0, text="Iniciando GR...")
+        gr = fetch_gr(token, mep, pb)
+        pb.empty()
+        s.update(label="✅ Ganancia Realizada descargada", state="complete", expanded=False)
+    status_container.empty()
+    return gr
 
 
 # ── Carga de datos — Transferencias ─────────────────────────────────────────────
@@ -1838,7 +2070,7 @@ def generar_html(
         .replace("__MEP__", f"{mep:.2f}")
         .replace("__MEP_DISPLAY__", f"{mep:,.2f}")
         .replace("__TS__", ts)
-        .replace("__INTERVAL_S__", str(INTERVAL_S))
+        .replace("__INTERVAL_S__", str(PRECIO_REFRESH_S))
         .replace("__USER_NAME__", user_name)
         .replace("__MERCADO_JSON__", _js_safe(mercado_result))
         .replace("__AUTO_TAB_CLIENTE__", "true" if auto_tab_cliente else "false")
@@ -1948,9 +2180,16 @@ if time.time() - float(login_ts) > SESSION_MAX_S:
 # directo es bloqueado por el navegador; window.open(..., '_blank') sí
 # funciona porque abre un contexto de navegación nuevo en vez de navegar el
 # frame padre existente) — acá lo interpretamos como pedido de vaciar la
-# caché compartida y volver a pedirle los datos a Cohen.
+# caché compartida y volver a pedirle los datos a Cohen. Sólo vacía precio
+# (cargar_gnr/_cargar_precios_mercado) y Ganancia Realizada — el sync
+# diario de cantidades/costos (_cargar_base_gnr_del_dia) NO se fuerza
+# desde acá a propósito: es la parte pesada (~295 cuentas) que justamente
+# se evita repetir seguido; si hace falta forzarla igual, usar
+# `_cargar_base_gnr_del_dia.clear()` manualmente.
 if st.query_params.get("force_refresh") == "1":
-    cargar_datos.clear()
+    cargar_gnr.clear()
+    _cargar_precios_mercado.clear()
+    cargar_gr.clear()
     st.query_params.clear()
     st.rerun()
 
@@ -2070,7 +2309,8 @@ if pagina == "CEDEAR / GNR" and st.session_state.get("cuenta_rapida"):
 
 elif pagina == "CEDEAR / GNR":
     try:
-        gnr, gr, mep, ts = cargar_datos()
+        gnr, mep, ts = cargar_gnr()
+        gr = cargar_gr()
     except Exception as e:
         st.error(f"❌ Error al conectar con la API de Cohen: {e}")
         st.stop()
