@@ -8,6 +8,7 @@
 import json
 import time
 import streamlit as st
+import pandas as pd
 import requests
 from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -732,6 +733,114 @@ def fetch_gnr_una_cuenta(token: str, numero_cuenta: str) -> list:
         if fila:
             posiciones.append(fila)
     return posiciones
+
+
+# ── Posición por Comitente (cualquier instrumento, no sólo Cedear/Acciones) ────
+# Herramienta aparte de "CEDEAR / GNR": acá se elige una o varias cuentas y se
+# trae TODA su cartera (ON, Bonos, FCI, Cedear/Acciones, etc.), con el precio
+# promedio de compra de cada especie contra el precio de mercado actual. No
+# aplica el arancel medido de 1.27% (es específico de Cedear/Acciones, ver
+# ARANCEL_PCT) — para el resto de los instrumentos se usa el costo que informa
+# Cohen tal cual, o el importe neto real de los boletos si hay que
+# reconstruirlo (ya viene neto de comisiones, no hace falta ajustarlo).
+
+
+def procesar_fila_posicion(r: dict, id_com: int, nro: str, nombre: str, token: str) -> dict | None:
+    """Fila genérica de posicion/listResumen para la herramienta de Posición
+    por Comitente. Ignora filas de Efectivo (no son una posición con P&L) y
+    las que no tengan cantidad. costo_fuente distingue de dónde sale el costo
+    de compra, igual criterio que `_procesar_fila_gnr`: "cohen" = costoTotalARS/
+    USD informado por Cohen; "boletos" = reconstruido desde los boletos de
+    Compra reales vía `reconstruir_costo_desde_boletos` (dolarizados al MEP
+    histórico del día de cada boleto); "sin_datos" = ni Cohen ni los boletos
+    tienen costo (típico de una posición recibida por transferencia interna
+    entre cuentas, sin boleto de compra propio — ver el caso real de las
+    cuentas 108176/108212/108216 con ON de IRCPO/PLC5O/TSC4O)."""
+    tipo = r.get("tipoInstrumento") or r.get("instrumentoTipoDescripcion", "")
+    if not tipo or tipo == "Efectivo":
+        return None
+    cantidad = float(r.get("cantidad") or 0)
+    id_instrumento = r.get("idInstrumento")
+    if not cantidad or not id_instrumento:
+        return None
+    costo_ars = float(r.get("costoTotalARS") or 0)
+    costo_usd = float(r.get("costoTotalUSD") or 0)
+    if costo_ars == 0 and costo_usd == 0:
+        costo_ars, costo_usd = reconstruir_costo_desde_boletos(
+            id_com, id_instrumento, cantidad, token
+        )
+        costo_fuente = "boletos" if (costo_ars or costo_usd) else "sin_datos"
+        # Bonos/ON cotizan por cada 100 de valor nominal (ver cotizacionARS/USD
+        # más abajo), a diferencia de Acciones/Cedear/FCI que cotizan por unidad
+        # — al reconstruir desde boletos (costo total / cantidad) hay que
+        # aplicar la misma escala para que el precio promedio de compra quede
+        # comparable con el precio de mercado. Cuando el costo viene de Cohen
+        # (costoUnitarioARS/USD) no hace falta: Cohen ya lo entrega escalado.
+        escala = 100 if tipo.startswith(("ON", "Bono", "Letra")) else 1
+        precio_compra_ars = round(costo_ars / cantidad * escala, 4) if costo_ars else None
+        precio_compra_usd = round(costo_usd / cantidad * escala, 4) if costo_usd else None
+    else:
+        costo_fuente = "cohen"
+        precio_compra_ars = round(float(r.get("costoUnitarioARS") or 0), 4) or None
+        precio_compra_usd = round(float(r.get("costoUnitarioUSD") or 0), 4) or None
+    valor_ars = float(r.get("saldoValorizadoARS") or r.get("saldoValorizado") or 0)
+    valor_usd_raw = r.get("saldoValorizadoUSD")
+    valor_usd = round(float(valor_usd_raw), 2) if valor_usd_raw else 0.0
+    pnl_ars = round(valor_ars - costo_ars, 2) if costo_ars else None
+    pnl_pct_ars = round(pnl_ars / costo_ars * 100, 2) if costo_ars else None
+    pnl_usd = round(valor_usd - costo_usd, 2) if costo_usd else None
+    pnl_pct_usd = round(pnl_usd / costo_usd * 100, 2) if costo_usd else None
+    return {
+        "nro_cuenta": nro,
+        "cliente": nombre,
+        "ticker": r.get("instrumentoSimbolo") or r.get("ticker") or "",
+        "descripcion": r.get("instrumentoDescripcion") or r.get("denominacion") or "",
+        "tipo": tipo,
+        "moneda": r.get("moneda", ""),
+        "cantidad": cantidad,
+        "precio_mercado_ars": round(float(r.get("cotizacionARS") or r.get("cotizacion") or 0), 4),
+        "precio_mercado_usd": round(float(r.get("cotizacionUSD") or 0), 4),
+        "precio_compra_prom_ars": precio_compra_ars,
+        "precio_compra_prom_usd": precio_compra_usd,
+        "valor_ars": round(valor_ars, 2),
+        "valor_usd": valor_usd,
+        "costo_ars": round(costo_ars, 2),
+        "costo_usd": round(costo_usd, 2),
+        "costo_fuente": costo_fuente,
+        "pnl_ars": pnl_ars,
+        "pnl_pct_ars": pnl_pct_ars,
+        "pnl_usd": pnl_usd,
+        "pnl_pct_usd": pnl_pct_usd,
+    }
+
+
+@st.cache_data(ttl=PRECIO_REFRESH_S, show_spinner=False)
+def _cargar_posicion_comitentes(numeros_cuenta: tuple, _token: str) -> list:
+    """Cartera completa de una o varias cuentas puntuales (por número de
+    cuenta visible), cacheada PRECIO_REFRESH_S. A diferencia de `fetch_gnr`,
+    no recorre las ~295 cuentas: sólo pide `posicion/listResumen` de las
+    cuentas elegidas, en paralelo."""
+    comitentes = get_comitentes(_token)
+    cmap = {parsear_comitente(c)[0]: c for c in comitentes}
+    elegidos = [cmap[n] for n in numeros_cuenta if n in cmap]
+    filas = []
+
+    def fetch(c):
+        return c, get_posiciones(c["id"], _token)
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futuros = {ex.submit(fetch, c): c for c in elegidos}
+        for fut in as_completed(futuros):
+            try:
+                c, rows = fut.result()
+            except Exception:
+                continue
+            nro, nombre = parsear_comitente(c)
+            for r in rows:
+                fila = procesar_fila_posicion(r, c["id"], nro, nombre, _token)
+                if fila:
+                    filas.append(fila)
+    return filas
 
 
 # ── Fetch paralelo — Ganancia Realizada ───────────────────────────────────────
@@ -2234,7 +2343,7 @@ if "pagina" not in st.session_state:
 if st.session_state["pagina"] is None:
     st.markdown("## 📊 Dashboards QTM Capital")
     st.caption(f"👤 {user_name}")
-    col1, col2 = st.columns(2)
+    col1, col2, col5 = st.columns(3)
     with col1:
         if st.button("📈 CEDEAR / GNR", use_container_width=True, type="primary"):
             st.session_state["pagina"] = "CEDEAR / GNR"
@@ -2242,6 +2351,10 @@ if st.session_state["pagina"] is None:
     with col2:
         if st.button("💸 Transferencias", use_container_width=True, type="primary"):
             st.session_state["pagina"] = "Transferencias"
+            st.rerun()
+    with col5:
+        if st.button("🧮 Posición por Comitente", use_container_width=True, type="primary"):
+            st.session_state["pagina"] = "Posición por Comitente"
             st.rerun()
 
     st.divider()
@@ -2275,7 +2388,7 @@ if st.session_state["pagina"] is None:
 
 pagina = st.session_state["pagina"]
 
-nav1, nav2, nav3, nav4 = st.columns([2, 2, 3, 1.3])
+nav1, nav2, nav5, nav3, nav4 = st.columns([2, 2, 2.5, 1, 1.3])
 with nav1:
     if st.button(
         "📈 CEDEAR / GNR",
@@ -2292,6 +2405,14 @@ with nav2:
         type="primary" if pagina == "Transferencias" else "secondary",
     ):
         st.session_state["pagina"] = "Transferencias"
+        st.rerun()
+with nav5:
+    if st.button(
+        "🧮 Posición por Comitente",
+        use_container_width=True,
+        type="primary" if pagina == "Posición por Comitente" else "secondary",
+    ):
+        st.session_state["pagina"] = "Posición por Comitente"
         st.rerun()
 with nav4:
     st.button("Cerrar sesión", on_click=st.logout, use_container_width=True)
@@ -2388,6 +2509,117 @@ elif pagina == "Transferencias":
     hoy_iso = date.today().isoformat()
     html_tf = tc.generar_html(tf, fci, ing, tf_range_desde, hoy_iso, tf_ts, user_name)
     st.components.v1.html(html_tf, height=900, scrolling=True)
+
+elif pagina == "Posición por Comitente":
+    st.caption(
+        "Elegí una o varias cuentas comitentes para ver su cartera completa "
+        "(cualquier instrumento, no sólo Cedear/Acciones) con el precio "
+        "promedio de compra de cada especie contra el precio de mercado."
+    )
+    try:
+        comitentes_posc = _listar_comitentes_rapido()
+    except Exception as e:
+        st.error(f"❌ Error al conectar con la API de Cohen: {e}")
+        st.stop()
+    opciones_posc = {c["desc"]: parsear_comitente(c)[0] for c in comitentes_posc}
+
+    col_sel, col_btn = st.columns([4, 1])
+    with col_sel:
+        cuentas_elegidas = st.multiselect(
+            "Cuentas comitentes", options=sorted(opciones_posc.keys()),
+            placeholder="Buscar cuenta por número o nombre...",
+        )
+    with col_btn:
+        st.write("")
+        consultar = st.button(
+            "🔎 Consultar", use_container_width=True, disabled=not cuentas_elegidas
+        )
+
+    if consultar:
+        st.session_state["posc_numeros"] = tuple(sorted(opciones_posc[c] for c in cuentas_elegidas))
+
+    numeros_posc = st.session_state.get("posc_numeros")
+    if not numeros_posc:
+        st.stop()
+
+    try:
+        token_posc = obtener_token()
+        posicion = _cargar_posicion_comitentes(numeros_posc, token_posc)
+    except Exception as e:
+        st.error(f"❌ Error al conectar con la API de Cohen: {e}")
+        st.stop()
+
+    if not posicion:
+        st.warning("No se encontraron posiciones para las cuentas elegidas.")
+        st.stop()
+
+    df_posc = pd.DataFrame(posicion)
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        tipos_posc = st.multiselect(
+            "Filtrar por tipo de instrumento",
+            options=sorted(df_posc["tipo"].unique()),
+        )
+    with col_f2:
+        ticker_posc = st.text_input("Filtrar por ticker (contiene)", "")
+
+    df_filtrado = df_posc
+    if tipos_posc:
+        df_filtrado = df_filtrado[df_filtrado["tipo"].isin(tipos_posc)]
+    if ticker_posc:
+        df_filtrado = df_filtrado[
+            df_filtrado["ticker"].str.contains(ticker_posc, case=False, na=False)
+        ]
+
+    sin_datos = int((df_filtrado["costo_fuente"] == "sin_datos").sum())
+    if sin_datos:
+        st.warning(
+            f"⚠️ {sin_datos} posición(es) sin costo de compra disponible (ni Cohen "
+            "ni boletos propios) — probablemente recibidas por transferencia interna "
+            "entre cuentas. El P&L de esas filas queda vacío."
+        )
+
+    st.dataframe(
+        df_filtrado[
+            [
+                "nro_cuenta", "cliente", "ticker", "descripcion", "tipo", "moneda",
+                "cantidad", "precio_compra_prom_usd", "precio_mercado_usd",
+                "pnl_usd", "pnl_pct_usd", "precio_compra_prom_ars", "precio_mercado_ars",
+                "pnl_ars", "pnl_pct_ars", "costo_fuente",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "nro_cuenta": "Cuenta",
+            "cliente": "Cliente",
+            "ticker": "Ticker",
+            "descripcion": "Descripción",
+            "tipo": "Tipo",
+            "moneda": "Moneda",
+            "cantidad": st.column_config.NumberColumn("Cantidad", format="%.2f"),
+            "precio_compra_prom_usd": st.column_config.NumberColumn("Precio compra prom. U$S", format="%.4f"),
+            "precio_mercado_usd": st.column_config.NumberColumn("Precio mercado U$S", format="%.4f"),
+            "pnl_usd": st.column_config.NumberColumn("P&L U$S", format="%.2f"),
+            "pnl_pct_usd": st.column_config.NumberColumn("P&L % U$S", format="%.2f%%"),
+            "precio_compra_prom_ars": st.column_config.NumberColumn("Precio compra prom. $", format="%.4f"),
+            "precio_mercado_ars": st.column_config.NumberColumn("Precio mercado $", format="%.4f"),
+            "pnl_ars": st.column_config.NumberColumn("P&L $", format="%.2f"),
+            "pnl_pct_ars": st.column_config.NumberColumn("P&L % $", format="%.2f%%"),
+            "costo_fuente": "Fuente costo",
+        },
+    )
+    st.caption("Tip: seleccioná celdas de la tabla y Ctrl+C para copiar/pegar en una hoja de cálculo.")
+
+    tot_valor_usd = df_filtrado["valor_usd"].sum()
+    tot_costo_usd = df_filtrado["costo_usd"].sum()
+    tot_pnl_usd = tot_valor_usd - tot_costo_usd
+    tot_pnl_pct_usd = (tot_pnl_usd / tot_costo_usd * 100) if tot_costo_usd else 0.0
+    col_t1, col_t2, col_t3 = st.columns(3)
+    col_t1.metric("Valor de mercado (filtrado) U$S", f"{tot_valor_usd:,.2f}")
+    col_t2.metric("Costo de compra (filtrado) U$S", f"{tot_costo_usd:,.2f}")
+    col_t3.metric("P&L (filtrado) U$S", f"{tot_pnl_usd:,.2f}", f"{tot_pnl_pct_usd:.2f}%")
 
 # ── Auto-rerun de Streamlit para refrescar datos ───────────────────────────────
 time.sleep(60)
