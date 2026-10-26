@@ -846,11 +846,27 @@ def cargar_gnr():
     cantidades/costos/última compra, 1 vez por día) con el precio fresco
     (`_cargar_precios_mercado`: 2 llamadas para TODAS las Acciones/Cedear,
     cada PRECIO_REFRESH_S) — evita pedir la posición completa de las ~295
-    cuentas sólo para actualizar el precio. Devuelve (gnr, mep, ts)."""
+    cuentas sólo para actualizar el precio. Devuelve (gnr, mep, ts).
+
+    Si `api/operacionMercado/getListOperacionMercado` falla (confirmado
+    26/10/2026: devuelve 500 "CodigoFIX" para TODOS los tipos de
+    instrumento, un problema del lado de Cohen, no de esta app — probado
+    con ON/BONO/ACCION/CEDEAR), se cae al método viejo (`fetch_gnr`, la
+    posición completa de cada cuenta, con su precio nativo) en vez de
+    tirar abajo todo el dashboard. Más lento durante la caída, pero sigue
+    funcionando; se recupera solo en el próximo refresco de
+    PRECIO_REFRESH_S cuando Cohen levante el endpoint de nuevo.
+    """
     token = obtener_token()
     hoy_str = date.today().isoformat()
     base = _cargar_base_gnr_del_dia(hoy_str, token)
-    precios, mep = _cargar_precios_mercado(token)
+    try:
+        precios, mep = _cargar_precios_mercado(token)
+    except Exception:
+        mep = get_mep(token)
+        gnr = fetch_gnr(token, mep)
+        ts = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        return gnr, mep, ts
     gnr = [_combinar_precio_gnr(b, precios) for b in base]
     ts = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     return gnr, mep, ts
