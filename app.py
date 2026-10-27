@@ -192,7 +192,19 @@ def _combinar_precio_gnr(base: dict, precios: dict) -> dict:
 
     valor_ars = round(cantidad * precio_ars, 2)
     valor_neto = round(valor_ars * ARANCEL_VENTA, 2)
-    valor_usd = round(cantidad * precio_usd, 2)
+    # valor_usd: NO se recalcula dolarizando precio_usd del bulk feed al
+    # vivo (ver nota en _procesar_fila_gnr_base — para algunos CEDEARs esa
+    # cuenta diverge fuerte del saldoValorizadoUSD real de Cohen, caso FXI).
+    # Se ancla a valor_usd_dia (el saldoValorizadoUSD nativo de Cohen al
+    # momento del sync diario) y se lo escala por la misma variación % de
+    # precio en pesos que ya trae el bulk feed — así se refleja el
+    # movimiento intradiario sin heredar el desvío de dolarizar en vivo.
+    precio_ars_dia = base.get("precio_ars_dia") or 0.0
+    valor_usd_dia = base.get("valor_usd_dia") or 0.0
+    if precio_ars_dia and valor_usd_dia:
+        valor_usd = round(valor_usd_dia * (precio_ars / precio_ars_dia), 2)
+    else:
+        valor_usd = round(cantidad * precio_usd, 2)
     valor_neto_usd = round(valor_usd * ARANCEL_VENTA, 2)
     pnl_ars = round(valor_neto - costo_ars, 2)
     pnl_pct_ars = round(pnl_ars / costo_ars * 100, 2) if costo_ars else 0.0
@@ -608,6 +620,29 @@ def _procesar_fila_gnr_base(
     ultima_compra, ventas_posteriores = extraer_ultima_compra(
         boletos_comitente, ticker, token
     )
+    # precio_ars_dia/valor_usd_dia: foto del momento del sync diario, usada
+    # por `_combinar_precio_gnr` para escalar el valor en USD de forma
+    # PROPORCIONAL al movimiento de precio en pesos, en vez de recalcularlo
+    # dolarizando el precio de pizarra en vivo al MEP/cable del bulk feed.
+    # Motivo (caso real detectado 27/10/2026, cuenta 105591, FXI): el
+    # cotizacionUSD "en vivo" de un CEDEAR (y su par en dólares del bulk
+    # feed) puede no coincidir con el saldoValorizadoUSD que informa Cohen
+    # para esa posición — Cohen valoriza el USD de estos CEDEARs con una
+    # cotización propia (no siempre MEP/cable puro), que es la que el
+    # cliente ve en su cuenta. Multiplicar cantidad×precio_usd_en_vivo del
+    # bulk feed dio 4013 USD cuando el valor real (saldoValorizadoUSD de
+    # Cohen) era 3145 — un desvío de ~25%, no una diferencia de redondeo.
+    # Anclar al saldoValorizadoUSD de Cohen y sólo escalarlo por la
+    # variación intradiaria del precio en pesos (confiable: coincide con
+    # variacionPorcentaje del bulk feed) evita ese desvío sin tener que
+    # volver a pedir la posición completa cada PRECIO_REFRESH_S.
+    pnl_usd_bruto_dia = float(r.get("rendimientoUSD") or 0)
+    valor_usd_raw_dia = r.get("saldoValorizadoUSD")
+    valor_usd_dia = (
+        round(float(valor_usd_raw_dia), 2)
+        if valor_usd_raw_dia
+        else round(costo_usd_bruto + pnl_usd_bruto_dia, 2)
+    )
     return {
         "id_comitente": id_com,
         "id_instrumento": r.get("idInstrumento"),
@@ -621,6 +656,8 @@ def _procesar_fila_gnr_base(
         "costo_ars": costo_ars,
         "costo_usd": costo_usd,
         "costo_fuente": costo_fuente,
+        "precio_ars_dia": float(r.get("cotizacionARS") or r.get("cotizacion") or 0),
+        "valor_usd_dia": valor_usd_dia,
         "ultima_compra": ultima_compra,
         "ventas_posteriores": ventas_posteriores,
     }
