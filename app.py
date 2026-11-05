@@ -1478,12 +1478,20 @@ input[type=checkbox]{width:15px;height:15px;cursor:pointer}
     <div class="tab-pane fade" id="tab-alertas">
       <div class="row g-3 mb-3">
         <div class="col-auto">
-          <label class="form-label" style="font-size:.72rem">Umbral perdida (%)</label>
+          <label class="form-label" style="font-size:.72rem">Pérdida desde (%)</label>
           <input type="number" id="umbral-loss" class="form-control form-control-sm" value="10" style="width:90px" oninput="renderAlertas()">
         </div>
         <div class="col-auto">
-          <label class="form-label" style="font-size:.72rem">Umbral ganancia (%)</label>
+          <label class="form-label" style="font-size:.72rem">hasta (%) <span class="text-muted">opcional</span></label>
+          <input type="number" id="umbral-loss-max" class="form-control form-control-sm" placeholder="sin tope" style="width:90px" oninput="renderAlertas()">
+        </div>
+        <div class="col-auto">
+          <label class="form-label" style="font-size:.72rem">Ganancia desde (%)</label>
           <input type="number" id="umbral-gain" class="form-control form-control-sm" value="20" style="width:90px" oninput="renderAlertas()">
+        </div>
+        <div class="col-auto">
+          <label class="form-label" style="font-size:.72rem">hasta (%) <span class="text-muted">opcional</span></label>
+          <input type="number" id="umbral-gain-max" class="form-control form-control-sm" placeholder="sin tope" style="width:90px" oninput="renderAlertas()">
         </div>
       </div>
       <div id="alertas-content"></div>
@@ -2050,10 +2058,17 @@ function abrirOrdenDesdeAlertas(rows, operacion){
 }
 
 function renderAlertas(){
+  // "desde" es el piso de cada umbral (como antes); "hasta" es opcional — si
+  // se completa, acota el rango en vez de dejarlo abierto (ej. ganancias
+  // entre 5% y 10% en lugar de "todo lo que gane 5% o más").
   const ul=-Math.abs(Number(document.getElementById('umbral-loss').value)||10);
+  const ulMaxRaw=document.getElementById('umbral-loss-max').value;
+  const ulMax=ulMaxRaw===''?null:-Math.abs(Number(ulMaxRaw));
   const ug= Math.abs(Number(document.getElementById('umbral-gain').value)||20);
-  const losses=DATA.filter(d=>d.pnl_pct_usd<=ul).sort((a,b)=>a.pnl_pct_usd-b.pnl_pct_usd);
-  const gains =DATA.filter(d=>d.pnl_pct_usd>=ug).sort((a,b)=>b.pnl_pct_usd-a.pnl_pct_usd);
+  const ugMaxRaw=document.getElementById('umbral-gain-max').value;
+  const ugMax=ugMaxRaw===''?null:Math.abs(Number(ugMaxRaw));
+  const losses=DATA.filter(d=>d.pnl_pct_usd<=ul && (ulMax===null || d.pnl_pct_usd>=ulMax)).sort((a,b)=>a.pnl_pct_usd-b.pnl_pct_usd);
+  const gains =DATA.filter(d=>d.pnl_pct_usd>=ug && (ugMax===null || d.pnl_pct_usd<=ugMax)).sort((a,b)=>b.pnl_pct_usd-a.pnl_pct_usd);
 
   const tbl=(rows,tableId)=>`
     <div class="table-wrapper">
@@ -2079,7 +2094,7 @@ function renderAlertas(){
       <div class="col-lg-6">
         <div class="d-flex align-items-center mb-2 gap-2">
           <span class="badge bg-danger">${losses.length}</span>
-          <span class="section-title mb-0">Perdidas > ${Math.abs(ul)}%</span>
+          <span class="section-title mb-0">Perdidas ${ulMax===null?`&gt; ${Math.abs(ul)}%`:`entre ${Math.abs(ul)}% y ${Math.abs(ulMax)}%`}</span>
           <button class="btn btn-sm btn-outline-primary copy-btn ms-auto" onclick="copyTable('alertas-loss-table')">Copiar</button>
           <button class="btn btn-sm btn-warning" onclick="abrirOrdenDesdeAlertas(${JSON.stringify(losses.map(d=>({nro_cuenta:d.nro_cuenta,ticker:d.ticker})))}, 'VENTA')">
             Orden WA Masiva
@@ -2090,7 +2105,7 @@ function renderAlertas(){
       <div class="col-lg-6">
         <div class="d-flex align-items-center mb-2 gap-2">
           <span class="badge bg-success">${gains.length}</span>
-          <span class="section-title mb-0">Ganancias > ${ug}%</span>
+          <span class="section-title mb-0">Ganancias ${ugMax===null?`&gt; ${ug}%`:`entre ${ug}% y ${ugMax}%`}</span>
           <button class="btn btn-sm btn-outline-primary copy-btn ms-auto" onclick="copyTable('alertas-gain-table')">Copiar</button>
           <button class="btn btn-sm btn-warning" onclick="abrirOrdenDesdeAlertas(${JSON.stringify(gains.map(d=>({nro_cuenta:d.nro_cuenta,ticker:d.ticker})))}, 'VENTA')">
             Orden WA Masiva
